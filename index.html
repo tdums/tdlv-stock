@@ -382,6 +382,20 @@ showToast('Connecté en temps réel ✓');
       <button class="btn btn-primary" onclick="addSite()" style="height:42px;margin-bottom:0;">+</button>
     </div>
     <p style="font-size:11px;color:var(--text3);margin-top:8px;">L'entrepôt permet de distinguer produits finis / non conditionnés dans l'inventaire.</p>
+
+    <div class="divider" style="margin:20px 0;"></div>
+    <div class="slabel">Sécurité — Code PIN</div>
+    <div class="card">
+      <div class="form-check" style="margin-bottom:12px;">
+        <input type="checkbox" id="pin-enabled" onchange="togglePinEnabled()"/>
+        <label for="pin-enabled">Activer le code PIN au démarrage</label>
+      </div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:10px;">PIN actuel : <span id="pin-display">••••</span></div>
+      <div style="display:flex;gap:8px;">
+        <input class="form-input" id="pin-new" type="password" inputmode="numeric" maxlength="4" placeholder="Nouveau PIN (4 chiffres)" style="flex:1;"/>
+        <button class="btn btn-primary btn-sm" onclick="savePin()">Définir</button>
+      </div>
+    </div>
   </div>
 
 </div>
