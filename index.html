@@ -283,7 +283,7 @@ showToast('Connecté en temps réel ✓');
     <div id="dash-cond"><div class="empty">Rien d'urgent</div></div>
 
     <div class="divider"></div>
-    <div class="slabel">Tournées du jour</div>
+    <div class="slabel">Livraisons urgentes</div>
     <div id="dash-tournees"></div>
   </div>
 
@@ -367,7 +367,7 @@ showToast('Connecté en temps réel ✓');
       <div style="font-size:12px;color:var(--amber);">Basé sur vos estimations, le stock actuel et les DLC produits.</div>
     </div>
     <div id="prev-bons"><div class="empty">Configurez les estimations pour voir les suggestions</div></div>
-    <button class="btn btn-primary btn-full" style="margin-top:12px;" onclick="genererBons()">Recalculer les bons de commande</button>
+    <button class="btn btn-primary btn-full" style="margin-top:12px;" onclick="genererEtCreerBons()">Générer les bons de commande par PDV</button>
   </div>
 
   <!-- PARAMÈTRES -->
@@ -469,6 +469,7 @@ showToast('Connecté en temps réel ✓');
       <div class="form-group"><label class="form-label">DLC entrepôt (j)</label><input class="form-input" id="p-dlc-entrepot" type="number" placeholder="ex: 14"/></div>
       <div class="form-group"><label class="form-label">DLC point de vente (j)</label><input class="form-input" id="p-dlc-pdv" type="number" placeholder="ex: 7"/></div>
     </div>
+
     <div class="form-check" style="margin-bottom:12px;">
       <input type="checkbox" id="p-conditionner"/><label for="p-conditionner">À conditionner par nos soins</label>
     </div>
@@ -506,16 +507,11 @@ showToast('Connecté en temps réel ✓');
     <div class="form-group"><label class="form-label">Point de vente</label>
       <select class="form-select" id="cmd-site"></select>
     </div>
-    <div class="form-group"><label class="form-label">Tournée</label>
-      <select class="form-select" id="cmd-tournee">
-        <option value="09h00">Tournée 09h00</option>
-        <option value="15h00">Tournée 15h00</option>
-      </select>
-    </div>
+
     <div class="form-group"><label class="form-label">Produits (un par ligne: nom, quantité)</label>
       <textarea class="form-input" id="cmd-produits" rows="4" placeholder="ex:&#10;Carottes 1kg × 20&#10;Pommes 4.5kg × 10"></textarea>
     </div>
-    <div class="form-group"><label class="form-label">Volume estimé (% Kangoo)</label><input class="form-input" id="cmd-volume" type="number" placeholder="ex: 30"/></div>
+    <div class="form-group"><label class="form-label">Deadline livraison</label><input class="form-input" id="cmd-deadline" type="date"/></div>
     <button class="btn btn-primary btn-full" onclick="saveCommande()">Créer la commande</button>
   </div>
 </div>
@@ -622,20 +618,37 @@ function renderDashboard() {
   const cond = window.state.conditionnement || {};
   const commandes = window.state.commandes || {};
 
-  // Alertes stocks bas (< 10 unités)
+  // Alertes stocks PDV uniquement, basées sur les prévisions de vente
+  const previsions = window.state.previsions || {};
+  const sitesObj = window.state.sites || {};
+  const pdvSites = Object.entries(sitesObj).filter(([k,v]) => !v.entrepot);
+  const today2 = new Date();
+  const todayIdx2 = today2.getDay() === 0 ? 6 : today2.getDay() - 1;
   let alertesHtml = '';
   let alertCount = 0;
-  Object.entries(stocks).forEach(([siteKey, siteProduits]) => {
-    Object.entries(siteProduits || {}).forEach(([pid, data]) => {
-      if(data.qte < 10 && produits[pid]) {
-        alertCount++;
-        const niveau = data.qte < 3 ? 'red' : 'amber';
-        alertesHtml += `<div class="alert alert-${niveau}">
-          <div class="alert-text"><strong>${produits[pid].nom}</strong> — ${siteKey.replace(/_/g,' ')}
-          <div class="alert-sub">${data.qte} ${produits[pid].uniteVente} restants</div></div>
-          <span class="badge badge-${niveau === 'red' ? 'red':'amber'}">${data.qte < 3 ? 'CRITIQUE':'BAS'}</span>
-        </div>`;
-      }
+
+  pdvSites.forEach(([siteId, siteData]) => {
+    const siteKey = siteData.nom.replace(/ /g,'_');
+    const siteStocks = stocks[siteKey] || {};
+    Object.entries(produits).forEach(([pid, produit]) => {
+      if(produit.statut === 'archive') return;
+      const stockActuel = (siteStocks[pid]||{}).qte || 0;
+      // Ventes estimées aujourd'hui pour ce PDV
+      const pPrev = (previsions[siteId] || {})[pid] || {};
+      const venteJour = pPrev[['lun','mar','mer','jeu','ven','sam','dim'][todayIdx2]] || 0;
+      if(venteJour === 0) return; // Pas de prévision = pas d'alerte
+      // Niveau basé sur nb de jours couverts
+      const joursCouvert = venteJour > 0 ? stockActuel / venteJour : 99;
+      let niveau = null;
+      if(joursCouvert < 1) niveau = 'red';        // Ne couvre pas la journée
+      else if(joursCouvert < 2) niveau = 'amber';  // Entre 1 et 2 jours
+      if(!niveau) return;
+      alertCount++;
+      alertesHtml += '<div class="alert alert-' + niveau + '">'
+        + '<div class="alert-text"><strong>' + produit.nom + '</strong> — ' + siteData.nom
+        + '<div class="alert-sub">' + stockActuel + ' ' + produit.uniteVente + ' · ' + joursCouvert.toFixed(1) + 'j de ventes</div></div>'
+        + '<span class="badge badge-' + (niveau==='red'?'red':'amber') + '">' + (niveau==='red'?'CRITIQUE':'BAS') + '</span>'
+        + '</div>';
     });
   });
   document.getElementById('dash-alertes').innerHTML = alertesHtml || '<div class="empty">Aucune alerte stock</div>';
@@ -653,24 +666,17 @@ function renderDashboard() {
   document.getElementById('dash-cond').innerHTML = condHtml || '<div class="empty">Rien d\'urgent</div>';
   document.getElementById('m-cond').textContent = Object.values(cond).filter(v => !v.done).length;
 
-  // Tournées
-  const sites = window.SITES ? window.SITES.filter(s => s !== 'Entrepôt') : [];
-  const tournees = window.TOURNEES || [];
+  // Commandes urgentes du jour
+  const today = new Date().toISOString().split('T')[0];
+  const urgent = Object.values(commandes).filter(c => c.statut !== 'livre' && c.deadline && c.deadline <= today);
   let tourHtml = '';
-  tournees.forEach((t, i) => {
-    const cmdsTournee = Object.values(commandes).filter(c => c.tournee === t.heure && c.statut !== 'livre');
-    const totalVol = cmdsTournee.reduce((s, c) => s + (parseInt(c.volume)||0), 0);
-    const pct = Math.min(100, totalVol);
-    tourHtml += `<div class="tournee ${i===1?'t2':''}">
-      <div class="tournee-header">
-        <span class="tournee-time">${t.heure}</span>
-        <span class="badge ${i===0?'badge-blue':'badge-purple'}">${t.label}</span>
-        <span style="font-size:11px;color:var(--text2);margin-left:auto;">Kangoo: ${pct}%</span>
-      </div>
-      <div class="tournee-sites">${cmdsTournee.length} commande(s) — ${sites.join(', ')}</div>
-      <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%;background:${pct>85?'var(--red)':pct>60?'var(--amber)':'var(--green)'}"></div></div>
-    </div>`;
-  });
+  if(urgent.length === 0) {
+    tourHtml = '<div class="empty">Aucune livraison urgente</div>';
+  } else {
+    urgent.forEach(c => {
+      tourHtml += `<div class="alert alert-red"><div class="alert-text"><strong>${c.site}</strong><div class="alert-sub">Deadline : ${c.deadline}</div></div><span class="badge badge-red">URGENT</span></div>`;
+    });
+  }
   document.getElementById('dash-tournees').innerHTML = tourHtml;
   document.getElementById('m-livr').textContent = Object.values(commandes).filter(c => c.statut === 'pret').length;
 }
@@ -783,16 +789,37 @@ function renderStocksSite() {
   const siteStocks = stocks[siteKey] || {};
   const actifs = Object.entries(produits).filter(([k,v]) => v.statut !== 'archive');
   if(actifs.length === 0) { document.getElementById('stocks-content').innerHTML = '<div class="empty">Aucun produit configuré</div>'; return; }
+  // Find siteId for selected site
+  const sitesObjS = window.state.sites || {};
+  const siteEntryS = Object.entries(sitesObjS).find(([k,v]) => v.nom === selectedSite);
+  const siteIdS = siteEntryS ? siteEntryS[0] : null;
+  const isEntrepot = siteEntryS ? siteEntryS[1].entrepot : true;
+  const prevS = window.state.previsions || {};
+  const todayIdxS = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
+  const jourKeyS = ['lun','mar','mer','jeu','ven','sam','dim'][todayIdxS];
+
   document.getElementById('stocks-content').innerHTML = `<div class="card">${actifs.map(([k,v]) => {
     const s = siteStocks[k] || {};
     const qte = s.qte || 0;
-    const niveau = qte < 3 ? 'red' : qte < 10 ? 'amber' : 'green';
+    let niveau = 'green';
+    let niveauLabel = 'OK';
+    if(!isEntrepot && siteIdS) {
+      const venteJour = ((prevS[siteIdS]||{})[k]||{})[jourKeyS] || 0;
+      if(venteJour > 0) {
+        const joursCouvert = qte / venteJour;
+        if(joursCouvert < 1) { niveau = 'red'; niveauLabel = 'CRITIQUE'; }
+        else if(joursCouvert < 2) { niveau = 'amber'; niveauLabel = 'BAS'; }
+      }
+    } else if(isEntrepot) {
+      niveau = qte < 5 ? 'red' : qte < 20 ? 'amber' : 'green';
+      niveauLabel = niveau === 'red' ? 'CRITIQUE' : niveau === 'amber' ? 'BAS' : 'OK';
+    }
     return `<div class="list-item">
       <div class="priority p-${niveau==='red'?'urgent':niveau==='amber'?'high':'normal'}"></div>
-      <div class="list-main"><div class="list-title">${v.nom}</div><div class="list-sub">${v.categorie||''} · DLC ${selectedSite==='Entrepôt'?(v.dlcEntrepot||'?'):v.dlcPdv||'?'}j</div></div>
+      <div class="list-main"><div class="list-title">${v.nom}</div><div class="list-sub">${v.categorie||''} · DLC ${isEntrepot?(v.dlcEntrepot||'?'):v.dlcPdv||'?'}j</div></div>
       <div class="list-right">
         <div class="stock-level"><span class="stock-num" style="color:var(--${niveau})">${qte}</span><span class="stock-unit">${v.uniteVente}</span></div>
-        <span class="badge badge-${niveau}">${niveau==='red'?'CRITIQUE':niveau==='amber'?'BAS':'OK'}</span>
+        <span class="badge badge-${niveau}">${niveauLabel}</span>
       </div>
     </div>`;}).join('')}</div>`;
 }
@@ -919,7 +946,7 @@ function renderPrep() {
   document.getElementById('prep-list').innerHTML = items.map(([k,v]) => `
     <div class="card">
       <div class="card-header">
-        <div><div class="list-title">${v.site}</div><div class="list-sub">Tournée ${v.tournee} · ${v.volume||0}% Kangoo</div></div>
+        <div><div class="list-title">${v.site}</div><div class="list-sub">Deadline : ${v.deadline||'Non définie'}</div></div>
         <span class="badge ${v.statut==='preparation'?'badge-amber':v.statut==='pret'?'badge-green':'badge-blue'}">${v.statut==='preparation'?'En cours':v.statut==='pret'?'Prête':'Livrée'}</span>
       </div>
       <div style="font-size:13px;color:var(--text2);white-space:pre-line;margin-bottom:10px;">${v.produits||''}</div>
@@ -948,11 +975,11 @@ function openModalCommande() {
 async function saveCommande() {
   const site = document.getElementById('cmd-site').value;
   const produitsText = document.getElementById('cmd-produits').value;
+  const deadline = document.getElementById('cmd-deadline') ? document.getElementById('cmd-deadline').value : '';
   const data = {
     site,
-    tournee: document.getElementById('cmd-tournee').value,
     produits: produitsText,
-    volume: parseInt(document.getElementById('cmd-volume').value)||0,
+    deadline: deadline,
     statut: 'preparation', createdAt: Date.now()
   };
   await window.push(window.ref(window.db, 'commandes'), data);
@@ -1009,34 +1036,33 @@ async function deleteCommande(id) {
 // ── LIVRAISONS ────────────────────────────────────────────────────────
 function renderLivr() {
   const commandes = window.state.commandes || {};
-  const tournees = window.TOURNEES || [];
+  // Group by deadline
+  const enAttente = Object.entries(commandes).filter(([k,v]) => v.statut !== 'livre');
+  enAttente.sort((a,b) => (a[1].deadline||'').localeCompare(b[1].deadline||''));
   let html = '';
-  tournees.forEach((t, i) => {
-    const items = Object.entries(commandes).filter(([k,v]) => v.tournee === t.heure && v.statut !== 'livre');
-    const totalVol = items.reduce((s,[k,v]) => s + (parseInt(v.volume)||0), 0);
-    const pct = Math.min(100, totalVol);
-    const couleur = pct > 85 ? 'var(--red)' : pct > 60 ? 'var(--amber)' : 'var(--green)';
-    html += `<div class="tournee ${i===1?'t2':''}" style="margin-bottom:14px;">
-      <div class="tournee-header">
-        <span class="tournee-time">${t.heure}</span>
-        <span class="badge ${i===0?'badge-blue':'badge-purple'}">${t.label}</span>
-        <span style="font-size:12px;margin-left:auto;color:${couleur};font-family:'IBM Plex Mono',monospace;">${pct}% Kangoo</span>
-      </div>
-      <div class="progress-wrap" style="margin-bottom:10px;"><div class="progress-bar" style="width:${pct}%;background:${couleur}"></div></div>
-      ${items.length === 0 ? '<div style="font-size:13px;color:var(--text3);">Aucune commande</div>' :
-        items.map(([k,v]) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:0.5px solid var(--border);">
-          <div><div style="font-size:13px;font-weight:500;">${v.site}</div><div style="font-size:11px;color:var(--text2);">${v.volume||0}% Kangoo</div></div>
-          <span class="badge badge-green">Prête</span>
-        </div>`).join('')}
-    </div>`;
-  });
+  if(enAttente.length === 0) {
+    html = '<div class="empty">Aucune commande en cours</div>';
+  } else {
+    enAttente.forEach(([k,v]) => {
+      const today = new Date().toISOString().split('T')[0];
+      const isUrgent = v.deadline && v.deadline <= today;
+      const couleur = isUrgent ? 'var(--red)' : 'var(--green)';
+      html += `<div class="card" style="border-left:3px solid ${couleur};margin-bottom:8px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div><div style="font-size:14px;font-weight:500;">${v.site}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Deadline : <span style="color:${couleur};font-weight:500;">${v.deadline||'Non définie'}</span></div></div>
+          <span class="badge ${v.statut==='preparation'?'badge-amber':v.statut==='pret'?'badge-green':'badge-blue'}">${v.statut==='preparation'?'En prépa':v.statut==='pret'?'Prête':'Livrée'}</span>
+        </div>
+      </div>`;
+    });
+  }
   document.getElementById('livr-tournees').innerHTML = html;
 
   const prets = Object.entries(commandes).filter(([k,v])=>v.statut==='pret');
   document.getElementById('livr-pret').innerHTML = prets.length === 0 ? '<div class="empty">Aucune commande prête</div>' :
     prets.map(([k,v]) => `<div class="card">
       <div class="card-header">
-        <div><div class="list-title">${v.site}</div><div class="list-sub">Tournée ${v.tournee} · ${v.volume||0}% Kangoo</div></div>
+        <div><div class="list-title">${v.site}</div><div class="list-sub">Deadline : ${v.deadline||'Non définie'}</div></div>
         <button class="btn btn-primary btn-sm" onclick="setCommandeStatut('${k}','livre')">Livré ✓</button>
       </div>
     </div>`).join('');
@@ -1282,20 +1308,16 @@ function genererBons() {
     const manqueHtml = b.manque > 0
       ? '<span style="color:var(--red)">Manque: ' + b.manque + ' unités</span>'
       : '<span style="color:var(--green)">Stock suffisant ✓</span>';
-    const ticketBtn = b.manque > 0 && b.produit.aConditionner
-      ? '<button class="btn btn-primary btn-sm btn-full" style="margin-top:10px;" onclick="creerTicketCond(\'' + b.pid + '\',\'' + b.produit.nom + '\',' + b.manque + ',\'' + b.urgence + '\')">' + 'Créer ticket conditionnement (' + b.manque + ' unités)</button>'
-      : '';
     return '<div class="card" style="border-left:3px solid var(--' + couleur + ');margin-bottom:8px;">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">'
       + '<div style="flex:1;">'
       + '<div style="font-size:14px;font-weight:500;color:var(--text);">' + b.produit.nom + '</div>'
       + '<div style="font-size:12px;color:var(--text2);margin-top:3px;">Besoin ' + b.joursAPlanifier + 'j : ' + b.besoinTotal + ' · Stock entrepôt : ' + b.stockEntrepot + '</div>'
       + '<div style="font-size:12px;margin-top:3px;">' + manqueHtml + '</div>'
-      + (b.produit.aConditionner && b.manque > 0 ? '<div style="font-size:11px;color:var(--amber);margin-top:4px;">⚡ Conditionnement requis</div>' : '')
+      + (b.produit.aConditionner && b.manque > 0 ? '<div style="font-size:11px;color:var(--amber);margin-top:4px;">⚡ Conditionnement auto-généré</div>' : '')
       + '</div>'
       + '<span class="badge badge-' + couleur + '">' + label + '</span>'
       + '</div>'
-      + ticketBtn
       + '</div>';
   }).join('');
 }
@@ -1308,6 +1330,87 @@ async function creerTicketCond(pid, nom, qte, urgence) {
     done: false, createdAt: Date.now()
   });
   showToast('Ticket créé : ' + nom + ' (' + qte + ' unités) ✓');
+}
+
+
+async function genererEtCreerBons() {
+  const produits = window.state.produits || {};
+  const stocks = window.state.stocks || {};
+  const previsions = window.state.previsions || {};
+  const sites = window.state.sites || {};
+  if(!window.db || !window.push || !window.ref) { showToast('Firebase non prêt'); return; }
+
+  const entrepotEntry = Object.values(sites).find(function(s){return s.entrepot;});
+  const pdvEntries = Object.entries(sites).filter(function([sk,sv]){return !sv.entrepot;});
+  if(!entrepotEntry || pdvEntries.length === 0) { showToast('Configurez vos sites d\'abord'); return; }
+
+  const entrepotKey = entrepotEntry.nom.replace(/ /g,'_');
+  const entrepotStocks = stocks[entrepotKey] || {};
+  const today = new Date();
+  const todayIdx = today.getDay() === 0 ? 6 : today.getDay() - 1;
+  const isWeekend = todayIdx >= 5;
+  let nbBons = 0;
+  let nbTickets = 0;
+
+  for(const [siteId, siteData] of pdvEntries) {
+    const lignesBon = [];
+
+    for(const [pid, produit] of Object.entries(produits)) {
+      if(produit.statut === 'archive') continue;
+      const dlcPdv = produit.dlcPdv || 7;
+      const delaiLivraison = produit.delaiLivraison || 1;
+      if(isWeekend && dlcPdv > 1) continue;
+      const joursAPlanifier = Math.min(produit.dlcEntrepot || 14, 3);
+      const pPrev = (previsions[siteId] || {})[pid] || {};
+      let besoin = 0;
+      for(let i = 0; i < joursAPlanifier; i++) {
+        const jourIdx = (todayIdx + i) % 7;
+        if(jourIdx >= 5 && dlcPdv > 1) continue;
+        besoin += (pPrev[JOURS_SHORT[jourIdx]] || 0);
+      }
+      if(besoin <= 0) continue;
+
+      // Deadline = aujourd'hui + (DLC entrepôt - DLC PDV)
+      const delai = Math.max(1, (produit.dlcEntrepot || 14) - (dlcPdv));
+      const deadlineDate = new Date(today);
+      deadlineDate.setDate(deadlineDate.getDate() + delai);
+      const deadline = deadlineDate.toISOString().split('T')[0];
+
+      lignesBon.push({ pid, nom: produit.nom, besoin, deadline, dlcPdv, produit });
+
+      // Auto-ticket conditionnement si manque
+      const stockDispo = (entrepotStocks[pid]||{}).qte || 0;
+      const manque = besoin - stockDispo;
+      if(manque > 0 && produit.aConditionner) {
+        const priorite = dlcPdv <= 1 ? 'urgent' : dlcPdv <= 2 ? 'high' : 'normal';
+        await window.push(window.ref(window.db, 'conditionnement'), {
+          produitId: pid, produitNom: produit.nom, qte: manque, priorite,
+          note: 'Auto depuis bons de commande — ' + siteData.nom + ' manque ' + manque,
+          done: false, createdAt: Date.now()
+        });
+        nbTickets++;
+      }
+    }
+
+    if(lignesBon.length === 0) continue;
+
+    // Find nearest deadline for this PDV
+    const minDeadline = lignesBon.reduce(function(min, l) { return l.deadline < min ? l.deadline : min; }, lignesBon[0].deadline);
+    const produitsTexte = lignesBon.map(function(l) { return l.nom + ' × ' + l.besoin; }).join('\n');
+
+    await window.push(window.ref(window.db, 'commandes'), {
+      site: siteData.nom,
+      produits: produitsTexte,
+      deadline: minDeadline,
+      statut: 'preparation',
+      source: 'auto',
+      createdAt: Date.now()
+    });
+    nbBons++;
+  }
+
+  showToast(nbBons + ' bon(s) générés · ' + nbTickets + ' ticket(s) conditionnement');
+  genererBons();
 }
 
 function renderParams() {
