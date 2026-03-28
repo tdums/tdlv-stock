@@ -231,6 +231,7 @@ showToast('Connecté en temps réel');
     <button class="btn btn-primary btn-full" onclick="genererEtCreerBons()">Générer les bons de commande par PDV</button>
     <div id="bons-status" style="margin-top:8px;font-size:12px;color:var(--text3);text-align:center;"></div>
   </div>
+  <button class="btn btn-secondary btn-full" onclick="debugPrevisions()" style="margin-top:8px;font-size:12px;">Debug donnees</button>
 </div>
 
 <!-- PARAMÈTRES -->
@@ -968,7 +969,9 @@ async function genererEtCreerBons(){
 }
 
 
-function renderParams(){
+
+
+function debugPrevisions(){var p=getPrevisions();var pdvs=getPdvs();var msg="PDVs:"+pdvs.length;pdvs.forEach(function(e){var sid=e[0];var sd=e[1];var sp=p[sid]||{};msg+=" | "+sd.nom+"="+Object.keys(sp).length+"produits";});msg+=" | prevKeys:"+Object.keys(p).join(",");alert(msg);}function renderParams(){
   renderPinSettings();
   const entries=Object.entries(getSites());
   document.getElementById('params-sites-list').innerHTML=entries.length===0?'<div class="empty" style="padding:12px 0">Aucun site</div>':entries.map(([k,v])=>`
