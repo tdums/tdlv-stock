@@ -831,7 +831,7 @@ function genererApercu(){
 }
 
 async function genererEtCreerBons(){
-  const produits=getProduits();const stocks=getStocks();const previsions=getPrevisions();const sites=getSites();
+  const produits=getProduits();const stocks=getStocks();const previsions=getPrevisions();
   if(!window.db||!window.push||!window.ref){showToast('Firebase non prêt');return;}
   const ep=getEntrepot();const pdvEntries=getPdvs();
   if(!ep||pdvEntries.length===0){showToast('Configurez vos sites');return;}
@@ -848,43 +848,22 @@ async function genererEtCreerBons(){
 
   const epKey=ep[1].nom.replace(/ /g,'_');
   const epStocks=stocks[epKey]||{};
+  // Stock entrepôt disponible PAR PRODUIT — partagé entre tous PDVs et tous jours
+  const epRestant={};
+  Object.entries(produits).forEach(([pid])=>{epRestant[pid]=Math.max(0,(epStocks[pid]?.qte)||0);});
+
   if(statusEl)statusEl.textContent='Calcul...';
 
   // plan[dateStr][siteNom] = [{pid,nom,qte}]
   const plan={};
   // condNeeds[pid] = {p, manqueTot, stockInit}
   const condNeeds={};
-  // Stock entrepôt alloué globalement
-  const epAlloue={};
-  function epDispo(pid){return Math.max(0,(epStocks[pid]?.qte||0)-(epAlloue[pid]||0));}
-  function epConsommer(pid,qte){epAlloue[pid]=(epAlloue[pid]||0)+qte;}
 
-  function getDateStr(d){return d.toISOString().split('T')[0];}
-  function isWE(d){const dw=d.getDay();return dw===0||dw===6;}
-  function getJourIdx(d){const dw=d.getDay();return dw===0?6:dw-1;}
-  function getVente(pPrev,d){return pPrev[JOURS_SHORT[getJourIdx(d)]]||0;}
-
-  function planifierLivraison(dateStr,siteNom,pid,nomProduit,qte,p){
-    qte=Math.round(qte);if(qte<=0)return 0;
-    const dispo=epDispo(pid);
-    const livre=Math.min(qte,dispo);
-    const manque=qte-dispo;
-    if(livre>0){
-      epConsommer(pid,livre);
-      if(!plan[dateStr])plan[dateStr]={};
-      if(!plan[dateStr][siteNom])plan[dateStr][siteNom]=[];
-      const ex=plan[dateStr][siteNom].find(l=>l.pid===pid);
-      if(ex)ex.qte+=livre; else plan[dateStr][siteNom].push({pid,nom:nomProduit,qte:livre});
-    }
-    if(manque>0&&p.aConditionner){
-      if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-      condNeeds[pid].manqueTot+=manque;
-    }
-    return livre;
-  }
-
+  // Simuler chaque PDV indépendamment, jour par jour
+  // Le stock entrepôt se partage entre PDVs au fur et à mesure
   const HORIZON=14;
 
+  // Pour chaque PDV, simuler son stock PDV sur l'horizon
   for(const [siteId,siteData] of pdvEntries){
     const siteKey=siteData.nom.replace(/ /g,'_');
     const siteStocks=stocks[siteKey]||{};
@@ -892,60 +871,69 @@ async function genererEtCreerBons(){
     for(const [pid,p] of Object.entries(produits)){
       if(p.statut==='archive')continue;
       const dlvPdv=p.dlcPdv||7;
-      const dlvEp=p.dlcEntrepot||14;
       const pPrev=(previsions[siteId]||{})[pid]||{};
       const totalPrev=Object.values(pPrev).reduce((s,v)=>s+(v||0),0);
       if(totalPrev===0)continue;
 
-      // Stock PDV simulé jour par jour
-      let stockSim=(siteStocks[pid]||{}).qte||0;
+      let stockPdv=(siteStocks[pid]||{}).qte||0;
 
       for(let d=0;d<HORIZON;d++){
         const date=new Date();date.setDate(date.getDate()+d);
-        const ds=getDateStr(date);
-        const we=isWE(date);
-        const vente=getVente(pPrev,date);
+        const dow=date.getDay();
+        const ds=date.toISOString().split('T')[0];
+        const ji=dow===0?6:dow-1;
+        const isWEDay=dow===0||dow===6;
+        const vente=(isWEDay&&dlvPdv>1)?0:(pPrev[JOURS_SHORT[ji]]||0);
+        const peutLivrer=!isWEDay||(dlvPdv<=1);
 
-        if(dlvPdv<=1){
-          // ── DLV 1j : livrer chaque jour si besoin ──
-          if(vente>0&&stockSim<vente){
-            const aLivrer=vente-stockSim;
-            const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
-            stockSim+=livre;
+        if(peutLivrer&&vente>0&&stockPdv<vente){
+          // Calculer besoin = ventes sur dlvPdv jours livrables à partir d'aujourd'hui
+          let besoin=0;
+          for(let k=0;k<dlvPdv;k++){
+            const fd=new Date(date);fd.setDate(fd.getDate()+k);
+            const fdow=fd.getDay();const fji=fdow===0?6:fdow-1;
+            if((fdow===0||fdow===6)&&dlvPdv>1)continue;
+            besoin+=pPrev[JOURS_SHORT[fji]]||0;
           }
-        } else {
-          // ── DLV > 1j ──
-          if(we){
-            // Week-end : livraison dépannage UNIQUEMENT si stock = 0
-            if(stockSim<=0&&vente>0){
-              // Calculer besoin pour finir le week-end uniquement
-              let besoinWE=0;
-              for(let k=0;k<2;k++){
-                const fd=new Date(date);fd.setDate(fd.getDate()+k);
-                if(isWE(fd))besoinWE+=getVente(pPrev,fd);
-              }
-              const aLivrer=Math.max(0,besoinWE-stockSim);
-              const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
-              stockSim+=livre;
+          const aLivrer=Math.max(0,Math.round(besoin-stockPdv));
+          if(aLivrer>0){
+            const dispo=Math.max(0,epRestant[pid]||0);
+            const livre=Math.min(aLivrer,dispo);
+            const manque=aLivrer-dispo;
+            if(livre>0){
+              epRestant[pid]-=livre;
+              if(!plan[ds])plan[ds]={};
+              if(!plan[ds][siteData.nom])plan[ds][siteData.nom]=[];
+              const ex=plan[ds][siteData.nom].find(l=>l.pid===pid);
+              if(ex)ex.qte+=livre;else plan[ds][siteData.nom].push({pid,nom:p.nom,qte:livre});
+              stockPdv+=livre;
             }
-          } else {
-            // Jour ouvré : livrer si stock ne couvre pas les ventes du jour
-            if(vente>0&&stockSim<vente){
-              // Besoin = DLV jours de ventes (jours ouvrés seulement)
-              let besoin=0;
-              for(let k=0;k<dlvPdv;k++){
-                const fd=new Date(date);fd.setDate(fd.getDate()+k);
-                if(!isWE(fd))besoin+=getVente(pPrev,fd);
-              }
-              const aLivrer=Math.max(0,Math.round(besoin-stockSim));
-              const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
-              stockSim+=livre;
+            if(manque>0&&p.aConditionner){
+              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
+              condNeeds[pid].manqueTot+=manque;
             }
+          }
+        } else if(isWEDay&&dlvPdv>1&&stockPdv<=0&&vente>0){
+          // Dépannage WE : stock PDV = 0, livrer uniquement pour ce jour
+          const dispo=Math.max(0,epRestant[pid]||0);
+          const livre=Math.min(vente,dispo);
+          const manque=vente-dispo;
+          if(livre>0){
+            epRestant[pid]-=livre;
+            if(!plan[ds])plan[ds]={};
+            if(!plan[ds][siteData.nom])plan[ds][siteData.nom]=[];
+            const ex=plan[ds][siteData.nom].find(l=>l.pid===pid);
+            if(ex)ex.qte+=livre;else plan[ds][siteData.nom].push({pid,nom:p.nom,qte:livre});
+            stockPdv+=livre;
+          }
+          if(manque>0&&p.aConditionner){
+            if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
+            condNeeds[pid].manqueTot+=manque;
           }
         }
 
         // Consommer ventes du jour
-        stockSim=Math.max(0,stockSim-vente);
+        stockPdv=Math.max(0,stockPdv-vente);
       }
     }
   }
@@ -962,7 +950,7 @@ async function genererEtCreerBons(){
       nbBons++;
     }
   }
-  // Tickets conditionnement
+  // Tickets conditionnement groupés par produit
   for(const [pid,info] of Object.entries(condNeeds)){
     if(info.manqueTot<=0)continue;
     const dlvPdv=info.p.dlcPdv||7;
@@ -1015,9 +1003,8 @@ function updateBadges(){
   const cond=window.state.conditionnement||{};const commandes=window.state.commandes||{};
   const nc=Object.values(cond).filter(v=>!v.done&&(v.priorite==='urgent'||v.priorite==='high')).length;
   const np=Object.values(commandes).filter(v=>v.statut==='pret').length;
-  document.getElementById('badge-cond').style.display=nc>0?'flex':'none';document.getElementById('badge-cond').textContent=nc;
-  document.getElementById('badge-prep').style.display=np>0?'flex':'none';document.getElementById('badge-prep').textContent=np;
-  document.getElementById('badge-livr').style.display=np>0?'flex':'none';document.getElementById('badge-livr').textContent=np;
+  const bc=document.getElementById('badge-cond');if(bc){bc.style.display=nc>0?'flex':'none';bc.textContent=nc;}
+  const bp=document.getElementById('badge-prep');if(bp){bp.style.display=np>0?'flex':'none';bp.textContent=np;}
 }
 
 // ── INIT ──
