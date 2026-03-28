@@ -848,10 +848,11 @@ async function genererEtCreerBons(){
 
   const epKey=ep[1].nom.replace(/ /g,'_');
   const epStocks=stocks[epKey]||{};
+  // Stock entrepôt simulé — consommé au fur et à mesure
   const epStock={};
   Object.entries(epStocks).forEach(([pid,s])=>{epStock[pid]=s.qte||0;});
 
-  if(statusEl)statusEl.textContent='Calcul des besoins...';
+  if(statusEl)statusEl.textContent='Calcul des livraisons...';
 
   const isWE=todayIdx()>=5;
   let nbBons=0,nbTickets=0;
@@ -859,102 +860,76 @@ async function genererEtCreerBons(){
   // plan[deadlineStr][siteNom] = [{pid, nom, qte}]
   const plan={};
 
+  // Horizon de planification : 14 jours
+  const HORIZON=14;
+
   for(const [siteId,siteData] of pdvEntries){
     const siteKey=siteData.nom.replace(/ /g,'_');
     const siteStocks=stocks[siteKey]||{};
 
     for(const [pid,p] of Object.entries(produits)){
       if(p.statut==='archive')continue;
-      const dlvPdv=p.dlcPdv||7;
-      const dlvEp=p.dlcEntrepot||14;
+      const dlvPdv=p.dlcPdv||7;   // DLV max en PDV en jours
+      const dlvEp=p.dlcEntrepot||14; // DLV max en entrepôt
 
-      // Week-end : seulement DLV <= 1j
-      if(isWE&&dlvPdv>1)continue;
-
-      const stockPdv=(siteStocks[pid]||{}).qte||0;
+      // Simuler le stock PDV sur l'horizon, générer des livraisons quand nécessaire
+      let stockPdvSim=(siteStocks[pid]||{}).qte||0;
       const pPrev=(previsions[siteId]||{})[pid]||{};
 
-      // Calculer la vente moyenne journalière (jours ouvrés)
-      // et quand le stock PDV actuel va s'épuiser
-      let joursCouvertsParStock=0;
-      let stockRestant=stockPdv;
-      const today=new Date();
+      for(let d=0;d<HORIZON;d++){
+        const date=new Date();date.setDate(date.getDate()+d);
+        const dow=date.getDay(); // 0=dim, 6=sam
+        const dateStr=date.toISOString().split('T')[0];
+        const ji=dow===0?6:dow-1; // 0=lun...6=dim
+        const isWEDay=(dow===0||dow===6);
 
-      // Simuler jour par jour jusqu'à épuisement du stock PDV actuel
-      for(let i=0;i<30;i++){
-        const d=new Date(today);d.setDate(d.getDate()+i);
-        const dow=d.getDay();
-        // Week-end non livré pour DLV>1
-        if((dow===0||dow===6)&&dlvPdv>1){joursCouvertsParStock++;continue;}
-        const ji=dow===0?6:dow-1;
-        const vente=pPrev[JOURS_SHORT[ji]]||0;
-        if(vente===0){joursCouvertsParStock++;continue;}
-        stockRestant-=vente;
-        if(stockRestant<=0){break;}
-        joursCouvertsParStock++;
-      }
+        // Ventes du jour (0 si week-end pour produits DLV>1)
+        const venteJour=(isWEDay&&dlvPdv>1)?0:(pPrev[JOURS_SHORT[ji]]||0);
 
-      // Deadline = jour où le stock PDV s'épuise (max dlvEp jours)
-      // Pour DLV<=1 : livrer aujourd'hui toujours
-      let deadline;
-      if(dlvPdv<=1||isWE){
-        deadline=todayStr();
-      } else {
-        // Livrer quand le stock est sur le point de s'épuiser
-        // mais au plus tard dans dlvEp jours
-        const joursAvantLivraison=Math.max(0,Math.min(joursCouvertsParStock,dlvEp-1));
-        // S'assurer que la deadline est un jour ouvré
-        const deadlineDate=new Date(today);
-        deadlineDate.setDate(deadlineDate.getDate()+joursAvantLivraison);
-        const dow=deadlineDate.getDay();
-        if(dow===6)deadlineDate.setDate(deadlineDate.getDate()+2);// Sam->Lun
-        else if(dow===0)deadlineDate.setDate(deadlineDate.getDate()+1);// Dim->Lun
-        deadline=deadlineDate.toISOString().split('T')[0];
-      }
+        // Peut-on livrer ce jour ? Oui si jour ouvré OU si DLV<=1
+        const peutLivrer=!isWEDay||(dlvPdv<=1);
 
-      // Quantité à livrer = ventes prévues sur dlvPdv jours à partir de la deadline
-      // = de quoi remplir le PDV pour une DLV complète
-      const deadlineD=new Date(deadline+'T12:00:00');
-      let qteALivrer=0;
-      for(let i=0;i<dlvPdv;i++){
-        const d=new Date(deadlineD);d.setDate(d.getDate()+i);
-        const dow=d.getDay();
-        if((dow===0||dow===6)&&dlvPdv>1)continue;// Skip WE pour DLV>1
-        const ji=dow===0?6:dow-1;
-        qteALivrer+=pPrev[JOURS_SHORT[ji]]||0;
-      }
+        // On calcule combien de jours le stock actuel va tenir
+        // Si stock < ventes du jour ET on peut livrer : livrer maintenant
+        if(peutLivrer && stockPdvSim<venteJour){
+          // Calculer la quantité à livrer : couvrir dlvPdv jours à partir d'aujourd'hui
+          let besoin=0;
+          for(let k=0;k<dlvPdv;k++){
+            const fd=new Date(date);fd.setDate(fd.getDate()+k);
+            const fdow=fd.getDay();
+            const fji=fdow===0?6:fdow-1;
+            const fIsWE=(fdow===0||fdow===6);
+            if(fIsWE&&dlvPdv>1)continue;
+            besoin+=pPrev[JOURS_SHORT[fji]]||0;
+          }
+          // Déduire ce qui est déjà en stock PDV
+          const aLivrer=Math.max(0,Math.round(besoin-stockPdvSim));
+          if(aLivrer>0){
+            // Vérifier stock entrepôt
+            const stockEpDispo=Math.max(0,epStock[pid]||0);
+            const aLivrerEp=Math.min(aLivrer,stockEpDispo);
+            const manque=aLivrer-stockEpDispo;
 
-      // Stock PDV restant au moment de la livraison
-      let stockPdvALivraison=stockPdv;
-      const joursJusquaDeadline=Math.round((deadlineD-today)/(1000*60*60*24));
-      for(let i=0;i<joursJusquaDeadline;i++){
-        const d=new Date(today);d.setDate(d.getDate()+i);
-        const dow=d.getDay();
-        if((dow===0||dow===6)&&dlvPdv>1)continue;
-        const ji=dow===0?6:dow-1;
-        stockPdvALivraison-=pPrev[JOURS_SHORT[ji]]||0;
-      }
-      stockPdvALivraison=Math.max(0,stockPdvALivraison);
+            if(aLivrerEp>0){
+              epStock[pid]=stockEpDispo-aLivrerEp;
+              if(!plan[dateStr])plan[dateStr]={};
+              if(!plan[dateStr][siteData.nom])plan[dateStr][siteData.nom]=[];
+              // Ajouter ou fusionner avec ligne existante
+              const existing=plan[dateStr][siteData.nom].find(l=>l.pid===pid);
+              if(existing)existing.qte+=aLivrerEp;
+              else plan[dateStr][siteData.nom].push({pid,nom:p.nom,qte:Math.round(aLivrerEp)});
+              stockPdvSim+=aLivrerEp;
+            }
 
-      // On complète jusqu'à couvrir dlvPdv jours
-      const aLivrer=Math.max(0,qteALivrer-stockPdvALivraison);
-      if(aLivrer<=0)continue;
+            if(manque>0&&p.aConditionner){
+              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
+              condNeeds[pid].manqueTot+=manque;
+            }
+          }
+        }
 
-      // Stock entrepôt disponible
-      const stockEpDispo=Math.max(0,epStock[pid]||0);
-      const aLivrerEp=Math.min(aLivrer,stockEpDispo);
-      const manque=aLivrer-stockEpDispo;
-
-      if(aLivrerEp>0){
-        epStock[pid]=stockEpDispo-aLivrerEp;
-        if(!plan[deadline])plan[deadline]={};
-        if(!plan[deadline][siteData.nom])plan[deadline][siteData.nom]=[];
-        plan[deadline][siteData.nom].push({pid,nom:p.nom,qte:Math.round(aLivrerEp)});
-      }
-
-      if(manque>0&&p.aConditionner){
-        if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-        condNeeds[pid].manqueTot+=manque;
+        // Consommer les ventes du jour
+        stockPdvSim=Math.max(0,stockPdvSim-venteJour);
       }
     }
   }
@@ -962,6 +937,7 @@ async function genererEtCreerBons(){
   // Créer les commandes
   for(const [dateStr,sitesData] of Object.entries(plan).sort()){
     for(const [siteNom,lignes] of Object.entries(sitesData)){
+      if(lignes.length===0)continue;
       const produitsTexte=lignes.map(l=>`${l.nom} × ${l.qte}`).join('\n');
       await window.push(window.ref(window.db,'commandes'),{
         site:siteNom,produits:produitsTexte,deadline:dateStr,
@@ -978,7 +954,7 @@ async function genererEtCreerBons(){
     const prio=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
     await window.push(window.ref(window.db,'conditionnement'),{
       produitId:pid,produitNom:info.p.nom,qte:Math.ceil(info.manqueTot),priorite:prio,
-      note:`Manque tous PDV — stock entrepôt : ${info.stockInit}`,
+      note:`Manque tous PDV sur ${HORIZON}j — stock entrepôt : ${info.stockInit}`,
       done:false,createdAt:Date.now()
     });
     nbTickets++;
