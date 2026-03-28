@@ -596,17 +596,24 @@ function renderCond(){
     if(PRIO_ORDER[v.priorite]<PRIO_ORDER[grouped[v.produitNom].priorite])grouped[v.produitNom].priorite=v.priorite;
   });
   const done=Object.entries(cond).filter(([k,v])=>v.done&&(!v.doneAt||(now-v.doneAt)<=h24));
-  let html=Object.entries(grouped).map(([nom,g])=>`
-    <div class="card" style="border-left:3px solid var(--${PRIO_COLORS[g.priorite]||'blue'});">
+  // Store groups in window for onclick access
+  window._condGroups={};
+  let gIdx=0;
+  let html=Object.entries(grouped).map(([nom,g])=>{
+    const idx=gIdx++;
+    window._condGroups[idx]=g;
+    const c=PRIO_COLORS[g.priorite]||'blue';
+    return `<div class="card" style="border-left:3px solid var(--${c});">
       <div style="display:flex;align-items:flex-start;gap:12px;">
-        <div class="task-check" onclick="doneCondGroup(${JSON.stringify(g.keys)}, '${nom.replace(/'/g,"\'")}', ${g.qteTotal}, '${g.produitId}')"></div>
+        <div class="task-check" onclick="doneCondGroupIdx(${idx})"></div>
         <div style="flex:1;"><div style="font-size:14px;font-weight:500;">${nom}</div>
           <div style="font-size:12px;color:var(--text2);margin-top:3px;">${g.qteTotal} unités à conditionner · ${PRIO_LABELS[g.priorite]||g.priorite}</div>
           ${g.note?`<div style="font-size:11px;color:var(--text3);margin-top:2px;">${g.note}</div>`:''}
         </div>
-        <button onclick="deleteCondGroup(${JSON.stringify(g.keys)})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;">×</button>
+        <button onclick="deleteCondGroupIdx(${idx})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:4px 8px;">×</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   if(done.length>0){
     html+=`<div class="slabel" style="margin-top:8px;">Terminés (disparaissent après 24h)</div>`;
     html+=done.map(([k,v])=>`<div class="card" style="opacity:0.4;"><div style="display:flex;align-items:center;gap:12px;"><div class="task-check done"></div><div style="font-size:13px;color:var(--text2);text-decoration:line-through;">${v.produitNom} — ${v.qteReelle||v.qte} unités</div></div></div>`).join('');
@@ -616,27 +623,29 @@ function renderCond(){
   document.getElementById('badge-cond').style.display=nb>0?'flex':'none';document.getElementById('badge-cond').textContent=nb;
 }
 
-async function doneCondGroup(keys,nom,qteTotal,produitId){
-  const qteStr=prompt(`Quantité réellement conditionnée (prévue : ${qteTotal}) :`,qteTotal);
+async function doneCondGroupIdx(idx){
+  const g=window._condGroups&&window._condGroups[idx];if(!g)return;
+  const qteStr=prompt(`Quantité réellement conditionnée (prévue : ${g.qteTotal}) :`,g.qteTotal);
   if(qteStr===null)return;
-  const qteReelle=parseFloat(qteStr)||qteTotal;
+  const qteReelle=parseFloat(qteStr)||g.qteTotal;
   const now=Date.now();
-  for(const k of keys)await window.update(window.ref(window.db,'conditionnement/'+k),{done:true,doneAt:now,qteReelle:qteReelle/keys.length});
-  // Update entrepôt stock
+  for(const k of g.keys)await window.update(window.ref(window.db,'conditionnement/'+k),{done:true,doneAt:now,qteReelle:qteReelle/g.keys.length});
   const ep=getEntrepot();
-  if(ep&&produitId){
+  if(ep&&g.produitId){
     const sk=ep[1].nom.replace(/ /g,'_');
-    window.onValue(window.ref(window.db,`stocks/${sk}/${produitId}`),snap=>{
+    window.onValue(window.ref(window.db,`stocks/${sk}/${g.produitId}`),snap=>{
       const cur=(snap.val()||{}).qte||0;
-      window.set(window.ref(window.db,`stocks/${sk}/${produitId}`),{qte:cur+qteReelle,updatedAt:Date.now()});
+      window.set(window.ref(window.db,`stocks/${sk}/${g.produitId}`),{qte:cur+qteReelle,updatedAt:Date.now()});
     },{onlyOnce:true});
   }
   showToast(`✓ ${qteReelle} unités ajoutées au stock entrepôt`);
 }
 
-async function deleteCondGroup(keys){
+async function deleteCondGroupIdx(idx){
+  const g=window._condGroups&&window._condGroups[idx];if(!g){showToast('Erreur: tâche introuvable');return;}
   if(!confirm('Supprimer cette tâche ?'))return;
-  for(const k of keys)await window.remove(window.ref(window.db,'conditionnement/'+k));
+  for(const k of g.keys)await window.remove(window.ref(window.db,'conditionnement/'+k));
+  showToast('Tâche supprimée');
 }
 function openModalCond(){
   document.getElementById('c-produit').innerHTML=Object.entries(getProduits()).filter(([k,v])=>v.aConditionner&&v.statut!=='archive').map(([k,v])=>`<option value="${k}|${v.nom}">${v.nom}</option>`).join('');
@@ -843,39 +852,35 @@ async function genererEtCreerBons(){
 
   // plan[dateStr][siteNom] = [{pid,nom,qte}]
   const plan={};
-  const condNeeds={};// pid -> {p, manqueTot, stockInit}
-
-  // Stock entrepôt alloué globalement (partagé entre PDVs)
+  // condNeeds[pid] = {p, manqueTot, stockInit}
+  const condNeeds={};
+  // Stock entrepôt alloué globalement
   const epAlloue={};
   function epDispo(pid){return Math.max(0,(epStocks[pid]?.qte||0)-(epAlloue[pid]||0));}
   function epConsommer(pid,qte){epAlloue[pid]=(epAlloue[pid]||0)+qte;}
 
-  function ajouterAuPlan(dateStr,siteNom,pid,nomProduit,qte){
-    qte=Math.round(qte);if(qte<=0)return;
-    if(!plan[dateStr])plan[dateStr]={};
-    if(!plan[dateStr][siteNom])plan[dateStr][siteNom]=[];
-    const ex=plan[dateStr][siteNom].find(l=>l.pid===pid);
-    if(ex)ex.qte+=qte; else plan[dateStr][siteNom].push({pid,nom:nomProduit,qte});
-  }
+  function getDateStr(d){return d.toISOString().split('T')[0];}
+  function isWE(d){const dw=d.getDay();return dw===0||dw===6;}
+  function getJourIdx(d){const dw=d.getDay();return dw===0?6:dw-1;}
+  function getVente(pPrev,d){return pPrev[JOURS_SHORT[getJourIdx(d)]]||0;}
 
-  function getVente(pPrev,date){
-    const dow=date.getDay();const ji=dow===0?6:dow-1;
-    return pPrev[JOURS_SHORT[ji]]||0;
-  }
-
-  function dateStr(d){return d.toISOString().split('T')[0];}
-
-  function isWEDay(d){const dow=d.getDay();return dow===0||dow===6;}
-
-  // Calculer ventes sur N jours à partir d'une date (en comptant seulement les jours livrables selon DLV)
-  function besoinSurJours(pPrev,dateDebut,nbJours,dlvPdv){
-    let total=0;
-    for(let k=0;k<nbJours;k++){
-      const d=new Date(dateDebut);d.setDate(d.getDate()+k);
-      if(isWEDay(d)&&dlvPdv>1)continue;// WE non livré pour DLV>1
-      total+=getVente(pPrev,d);
+  function planifierLivraison(dateStr,siteNom,pid,nomProduit,qte,p){
+    qte=Math.round(qte);if(qte<=0)return 0;
+    const dispo=epDispo(pid);
+    const livre=Math.min(qte,dispo);
+    const manque=qte-dispo;
+    if(livre>0){
+      epConsommer(pid,livre);
+      if(!plan[dateStr])plan[dateStr]={};
+      if(!plan[dateStr][siteNom])plan[dateStr][siteNom]=[];
+      const ex=plan[dateStr][siteNom].find(l=>l.pid===pid);
+      if(ex)ex.qte+=livre; else plan[dateStr][siteNom].push({pid,nom:nomProduit,qte:livre});
     }
-    return total;
+    if(manque>0&&p.aConditionner){
+      if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
+      condNeeds[pid].manqueTot+=manque;
+    }
+    return livre;
   }
 
   const HORIZON=14;
@@ -887,76 +892,60 @@ async function genererEtCreerBons(){
     for(const [pid,p] of Object.entries(produits)){
       if(p.statut==='archive')continue;
       const dlvPdv=p.dlcPdv||7;
+      const dlvEp=p.dlcEntrepot||14;
       const pPrev=(previsions[siteId]||{})[pid]||{};
       const totalPrev=Object.values(pPrev).reduce((s,v)=>s+(v||0),0);
       if(totalPrev===0)continue;
 
-      let stockPdvSim=(siteStocks[pid]||{}).qte||0;
+      // Stock PDV simulé jour par jour
+      let stockSim=(siteStocks[pid]||{}).qte||0;
 
       for(let d=0;d<HORIZON;d++){
-        const today=new Date();today.setDate(today.getDate()+d);
-        const ds=dateStr(today);
-        const isWE=isWEDay(today);
-        const venteJour=getVente(pPrev,today);
+        const date=new Date();date.setDate(date.getDate()+d);
+        const ds=getDateStr(date);
+        const we=isWE(date);
+        const vente=getVente(pPrev,date);
 
-        // ── CAS WEEK-END ──
-        if(isWE){
-          if(dlvPdv<=1){
-            // DLV 1j : toujours livrer si besoin
-            const aLivrer=Math.max(0,venteJour-stockPdvSim);
-            if(aLivrer>0){
-              const dispo=epDispo(pid);
-              const livre=Math.min(aLivrer,dispo);
-              const manque=aLivrer-dispo;
-              if(livre>0){ajouterAuPlan(ds,siteData.nom,pid,p.nom,livre);epConsommer(pid,livre);stockPdvSim+=livre;}
-              if(manque>0&&p.aConditionner){
-                if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-                condNeeds[pid].manqueTot+=manque;
-              }
-            }
-          } else {
-            // DLV > 1j : livraison de dépannage UNIQUEMENT si stock PDV = 0
-            if(stockPdvSim<=0&&venteJour>0){
-              // Calculer besoin uniquement pour sam+dim restants
+        if(dlvPdv<=1){
+          // ── DLV 1j : livrer chaque jour si besoin ──
+          if(vente>0&&stockSim<vente){
+            const aLivrer=vente-stockSim;
+            const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
+            stockSim+=livre;
+          }
+        } else {
+          // ── DLV > 1j ──
+          if(we){
+            // Week-end : livraison dépannage UNIQUEMENT si stock = 0
+            if(stockSim<=0&&vente>0){
+              // Calculer besoin pour finir le week-end uniquement
               let besoinWE=0;
               for(let k=0;k<2;k++){
-                const fd=new Date(today);fd.setDate(fd.getDate()+k);
-                if(isWEDay(fd))besoinWE+=getVente(pPrev,fd);
+                const fd=new Date(date);fd.setDate(fd.getDate()+k);
+                if(isWE(fd))besoinWE+=getVente(pPrev,fd);
               }
-              const aLivrer=Math.max(0,besoinWE-stockPdvSim);
-              if(aLivrer>0){
-                const dispo=epDispo(pid);
-                const livre=Math.min(aLivrer,dispo);
-                if(livre>0){ajouterAuPlan(ds,siteData.nom,pid,p.nom,livre);epConsommer(pid,livre);stockPdvSim+=livre;}
-                if((aLivrer-dispo)>0&&p.aConditionner){
-                  if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-                  condNeeds[pid].manqueTot+=aLivrer-dispo;
-                }
-              }
+              const aLivrer=Math.max(0,besoinWE-stockSim);
+              const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
+              stockSim+=livre;
             }
-          }
-        }
-        // ── CAS JOUR OUVRÉ ──
-        else {
-          // Livrer si stock ne couvre pas les ventes du jour
-          if(venteJour>0&&stockPdvSim<venteJour){
-            const besoin=besoinSurJours(pPrev,today,dlvPdv,dlvPdv);
-            const aLivrer=Math.max(0,Math.round(besoin-stockPdvSim));
-            if(aLivrer>0){
-              const dispo=epDispo(pid);
-              const livre=Math.min(aLivrer,dispo);
-              const manque=aLivrer-dispo;
-              if(livre>0){ajouterAuPlan(ds,siteData.nom,pid,p.nom,livre);epConsommer(pid,livre);stockPdvSim+=livre;}
-              if(manque>0&&p.aConditionner){
-                if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-                condNeeds[pid].manqueTot+=manque;
+          } else {
+            // Jour ouvré : livrer si stock ne couvre pas les ventes du jour
+            if(vente>0&&stockSim<vente){
+              // Besoin = DLV jours de ventes (jours ouvrés seulement)
+              let besoin=0;
+              for(let k=0;k<dlvPdv;k++){
+                const fd=new Date(date);fd.setDate(fd.getDate()+k);
+                if(!isWE(fd))besoin+=getVente(pPrev,fd);
               }
+              const aLivrer=Math.max(0,Math.round(besoin-stockSim));
+              const livre=planifierLivraison(ds,siteData.nom,pid,p.nom,aLivrer,p);
+              stockSim+=livre;
             }
           }
         }
 
         // Consommer ventes du jour
-        stockPdvSim=Math.max(0,stockPdvSim-venteJour);
+        stockSim=Math.max(0,stockSim-vente);
       }
     }
   }
@@ -976,10 +965,11 @@ async function genererEtCreerBons(){
   // Tickets conditionnement
   for(const [pid,info] of Object.entries(condNeeds)){
     if(info.manqueTot<=0)continue;
-    const prio=(info.p.dlcPdv||7)<=1?'urgent':(info.p.dlcPdv||7)<=2?'high':'normal';
+    const dlvPdv=info.p.dlcPdv||7;
+    const prio=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
     await window.push(window.ref(window.db,'conditionnement'),{
       produitId:pid,produitNom:info.p.nom,qte:Math.ceil(info.manqueTot),priorite:prio,
-      note:`Auto — manque sur 14j tous PDV, stock entrepôt : ${info.stockInit}`,
+      note:`Auto — manque tous PDV, stock entrepôt : ${info.stockInit}`,
       done:false,createdAt:Date.now()
     });
     nbTickets++;
