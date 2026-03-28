@@ -874,40 +874,51 @@ async function genererEtCreerBons(){
 
   if(statusEl)statusEl.textContent='Calcul...';
 
-  // plan[dateStr][siteNom] = [{pid,nom,qte}]
   const plan={};
-  // condNeeds[pid] = {p, manqueTot, stockInit}
   const condNeeds={};
-
-  // Simuler chaque PDV indépendamment, jour par jour
-  // Le stock entrepôt se partage entre PDVs au fur et à mesure
   const HORIZON=14;
 
-  // Pour chaque PDV, simuler son stock PDV sur l'horizon
+  // APPROCHE: Pour chaque jour, calculer les besoins de TOUS les PDVs en même temps
+  // puis allouer le stock entrepôt proportionnellement entre les PDVs
+  
+  // Etat simulé du stock PDV par site et produit
+  const stockPdvSim={};
   for(const [siteId,siteData] of pdvEntries){
     const siteKey=siteData.nom.replace(/ /g,'_');
     const siteStocks=stocksFresh[siteKey]||{};
+    stockPdvSim[siteId]={};
+    for(const [pid] of Object.entries(produits)){
+      stockPdvSim[siteId][pid]=(siteStocks[pid]||{}).qte||0;
+    }
+  }
 
+  for(let d=0;d<HORIZON;d++){
+    const date=new Date();date.setDate(date.getDate()+d);
+    const dow=date.getDay();
+    const ds=date.toISOString().split('T')[0];
+    const ji=dow===0?6:dow-1;
+    const isWEDay=dow===0||dow===6;
+
+    // Pour chaque produit, calculer les besoins de livraison de TOUS les PDVs ce jour
     for(const [pid,p] of Object.entries(produits)){
       if(p.statut==='archive')continue;
       const dlvPdv=p.dlcPdv||7;
-      const pPrev=(previsions[siteId]||{})[pid]||{};
-      const totalPrev=Object.values(pPrev).reduce((s,v)=>s+(v||0),0);
-      if(totalPrev===0)continue;
+      const dlvEp=p.dlcEntrepot||14;
 
-      let stockPdv=(siteStocks[pid]||{}).qte||0;
+      // Collecter les besoins de chaque PDV pour ce produit ce jour
+      const besoinsParPdv=[];
+      for(const [siteId,siteData] of pdvEntries){
+        const pPrev=(previsions[siteId]||{})[pid]||{};
+        const totalPrev=Object.values(pPrev).reduce((s,v)=>s+(v||0),0);
+        if(totalPrev===0)continue;
 
-      for(let d=0;d<HORIZON;d++){
-        const date=new Date();date.setDate(date.getDate()+d);
-        const dow=date.getDay();
-        const ds=date.toISOString().split('T')[0];
-        const ji=dow===0?6:dow-1;
-        const isWEDay=dow===0||dow===6;
+        const stockPdv=stockPdvSim[siteId][pid]||0;
         const vente=(isWEDay&&dlvPdv>1)?0:(pPrev[JOURS_SHORT[ji]]||0);
         const peutLivrer=!isWEDay||(dlvPdv<=1);
+        const depannageWE=isWEDay&&dlvPdv>1&&stockPdv<=0&&vente>0;
 
         if(peutLivrer&&vente>0&&stockPdv<vente){
-          // Calculer besoin = ventes sur dlvPdv jours livrables à partir d'aujourd'hui
+          // Besoin = DLV jours de ventes
           let besoin=0;
           for(let k=0;k<dlvPdv;k++){
             const fd=new Date(date);fd.setDate(fd.getDate()+k);
@@ -916,46 +927,47 @@ async function genererEtCreerBons(){
             besoin+=pPrev[JOURS_SHORT[fji]]||0;
           }
           const aLivrer=Math.max(0,Math.round(besoin-stockPdv));
-          if(aLivrer>0){
-            const dispo=Math.max(0,epRestant[pid]||0);
-            const livre=Math.min(aLivrer,dispo);
-            const manque=aLivrer-dispo;
-            if(livre>0){
-              epRestant[pid]-=livre;
-              if(!plan[ds])plan[ds]={};
-              if(!plan[ds][siteData.nom])plan[ds][siteData.nom]=[];
-              const ex=plan[ds][siteData.nom].find(l=>l.pid===pid);
-              if(ex)ex.qte+=livre;else plan[ds][siteData.nom].push({pid,nom:p.nom,qte:livre});
-              stockPdv+=livre;
-            }
-            // Only add conditionnement need if within product's DLC window
-            const dlvEp2=p.dlcEntrepot||14;
-            if(manque>0&&p.aConditionner&&d<dlvEp2){
-              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?epStocks[pid].qte:0||0};
-              condNeeds[pid].manqueTot+=manque;
-            }
-          }
-        } else if(isWEDay&&dlvPdv>1&&stockPdv<=0&&vente>0){
-          // Dépannage WE : stock PDV = 0, livrer uniquement pour ce jour
-          const dispo=Math.max(0,epRestant[pid]||0);
-          const livre=Math.min(vente,dispo);
-          const manque=vente-dispo;
-          if(livre>0){
-            epRestant[pid]-=livre;
-            if(!plan[ds])plan[ds]={};
-            if(!plan[ds][siteData.nom])plan[ds][siteData.nom]=[];
-            const ex=plan[ds][siteData.nom].find(l=>l.pid===pid);
-            if(ex)ex.qte+=livre;else plan[ds][siteData.nom].push({pid,nom:p.nom,qte:livre});
-            stockPdv+=livre;
-          }
-          if(manque>0&&p.aConditionner){
-            if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-            condNeeds[pid].manqueTot+=manque;
-          }
+          if(aLivrer>0)besoinsParPdv.push({siteId,siteData,aLivrer,depannage:false});
+        } else if(depannageWE){
+          besoinsParPdv.push({siteId,siteData,aLivrer:vente,depannage:true});
         }
+      }
 
-        // Consommer ventes du jour
-        stockPdv=Math.max(0,stockPdv-vente);
+      if(besoinsParPdv.length===0)continue;
+
+      // Calculer le besoin total et le stock disponible
+      const besoinTotal=besoinsParPdv.reduce((s,b)=>s+b.aLivrer,0);
+      const stockDispo=Math.max(0,epRestant[pid]||0);
+      const ratio=stockDispo>=besoinTotal?1:stockDispo/besoinTotal;
+
+      // Allouer proportionnellement à chaque PDV
+      for(const b of besoinsParPdv){
+        const livre=Math.round(b.aLivrer*ratio);
+        const manque=b.aLivrer-livre;
+        if(livre>0){
+          epRestant[pid]=Math.max(0,(epRestant[pid]||0)-livre);
+          if(!plan[ds])plan[ds]={};
+          if(!plan[ds][b.siteData.nom])plan[ds][b.siteData.nom]=[];
+          const ex=plan[ds][b.siteData.nom].find(l=>l.pid===pid);
+          if(ex)ex.qte+=livre;else plan[ds][b.siteData.nom].push({pid,nom:p.nom,qte:livre});
+          stockPdvSim[b.siteId][pid]=(stockPdvSim[b.siteId][pid]||0)+livre;
+        }
+        if(manque>0&&p.aConditionner&&d<dlvEp){
+          if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:(epStocks[pid]||{}).qte||0};
+          condNeeds[pid].manqueTot+=manque;
+        }
+      }
+    }
+
+    // Consommer les ventes du jour pour tous les PDVs
+    for(const [siteId,siteData] of pdvEntries){
+      for(const [pid,p] of Object.entries(produits)){
+        if(p.statut==='archive')continue;
+        const dlvPdv=p.dlcPdv||7;
+        const pPrev=(previsions[siteId]||{})[pid]||{};
+        const ji2=dow===0?6:dow-1;
+        const vente=(isWEDay&&dlvPdv>1)?0:(pPrev[JOURS_SHORT[ji2]]||0);
+        stockPdvSim[siteId][pid]=Math.max(0,(stockPdvSim[siteId][pid]||0)-vente);
       }
     }
   }
