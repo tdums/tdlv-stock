@@ -195,14 +195,7 @@ showToast('Connecté en temps réel');
   <button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="openModalCommande()">+ Nouvelle commande manuelle</button>
 </div>
 
-<!-- LIVRAISONS -->
-<div class="section" id="tab-livr">
-  <div class="slabel">Toutes les commandes en cours</div>
-  <div id="livr-list"><div class="empty">Aucune commande</div></div>
-  <div class="divider"></div>
-  <div class="slabel">Prêtes à livrer</div>
-  <div id="livr-pret"><div class="empty">Aucune commande prête</div></div>
-</div>
+
 
 <!-- INVENTAIRE -->
 <div class="section" id="tab-inv">
@@ -286,14 +279,10 @@ showToast('Connecté en temps réel');
   </div>
   <div class="nav-item" onclick="switchTab('prep',this)">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-    <span class="nav-label">Prépa</span>
+    <span class="nav-label">Livraisons</span>
     <div class="nav-badge" id="badge-prep" style="display:none">0</div>
   </div>
-  <div class="nav-item" onclick="switchTab('livr',this)">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="3" width="15" height="13" rx="1"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
-    <span class="nav-label">Livraisons</span>
-    <div class="nav-badge" id="badge-livr" style="display:none">0</div>
-  </div>
+
   <div class="nav-item" onclick="switchTab('inv',this)">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
     <span class="nav-label">Inventaire</span>
@@ -453,7 +442,7 @@ function renderTab(name){
   else if(name==='stocks')renderStocks();
   else if(name==='cond')renderCond();
   else if(name==='prep')renderPrep();
-  else if(name==='livr')renderLivr();
+
   else if(name==='inv')renderInv();
   else if(name==='prev')renderPrev();
   else if(name==='params')renderParams();
@@ -845,54 +834,63 @@ async function genererEtCreerBons(){
     if(cmd.source==='auto'&&cmd.statut==='preparation')
       await window.remove(window.ref(window.db,'commandes/'+cid));
   }
+  // Supprimer les anciens tickets conditionnement auto
+  for(const [cid,cond] of Object.entries(window.state.conditionnement||{})){
+    if(!cond.done&&cond.note&&cond.note.includes('Manque'))
+      await window.remove(window.ref(window.db,'conditionnement/'+cid));
+  }
 
   const epKey=ep[1].nom.replace(/ /g,'_');
   const epStocks=stocks[epKey]||{};
-  // Stock entrepôt simulé — consommé au fur et à mesure
-  const epStock={};
-  Object.entries(epStocks).forEach(([pid,s])=>{epStock[pid]=s.qte||0;});
+  if(statusEl)statusEl.textContent='Calcul...';
 
-  if(statusEl)statusEl.textContent='Calcul des livraisons...';
-
-  const isWE=todayIdx()>=5;
-  let nbBons=0,nbTickets=0;
-  const condNeeds={};
   // plan[deadlineStr][siteNom] = [{pid, nom, qte}]
   const plan={};
+  // Besoins conditionnement total par produit
+  const condNeeds={};
+  // Stock entrepôt alloué (partagé entre tous les PDVs)
+  const epAlloue={};// pid -> qte déjà allouée
 
-  // Horizon de planification : 14 jours
-  const HORIZON=14;
+  const HORIZON=14;// jours à planifier
 
+  // Pour chaque PDV, simuler indépendamment
   for(const [siteId,siteData] of pdvEntries){
     const siteKey=siteData.nom.replace(/ /g,'_');
     const siteStocks=stocks[siteKey]||{};
 
     for(const [pid,p] of Object.entries(produits)){
       if(p.statut==='archive')continue;
-      const dlvPdv=p.dlcPdv||7;   // DLV max en PDV en jours
-      const dlvEp=p.dlcEntrepot||14; // DLV max en entrepôt
+      const dlvPdv=p.dlcPdv||7;
+      const dlvEp=p.dlcEntrepot||14;
 
-      // Simuler le stock PDV sur l'horizon, générer des livraisons quand nécessaire
-      let stockPdvSim=(siteStocks[pid]||{}).qte||0;
+      const stockPdvInit=(siteStocks[pid]||{}).qte||0;
       const pPrev=(previsions[siteId]||{})[pid]||{};
+
+      // Vérifier s'il y a des prévisions pour ce produit dans ce PDV
+      const totalPrev=Object.values(pPrev).reduce((s,v)=>s+(v||0),0);
+      if(totalPrev===0)continue;// Pas de prévisions = pas de livraison
+
+      // Simuler stock PDV jour par jour sur HORIZON jours
+      let stockPdvSim=stockPdvInit;
+      // Savoir quand on a déjà planifié une livraison (évite double livraison même jour)
+      let derniereLivraisonJour=-1;
 
       for(let d=0;d<HORIZON;d++){
         const date=new Date();date.setDate(date.getDate()+d);
-        const dow=date.getDay(); // 0=dim, 6=sam
+        const dow=date.getDay();// 0=dim,6=sam
         const dateStr=date.toISOString().split('T')[0];
-        const ji=dow===0?6:dow-1; // 0=lun...6=dim
+        const ji=dow===0?6:dow-1;
         const isWEDay=(dow===0||dow===6);
 
-        // Ventes du jour (0 si week-end pour produits DLV>1)
+        // Ventes prévues ce jour
         const venteJour=(isWEDay&&dlvPdv>1)?0:(pPrev[JOURS_SHORT[ji]]||0);
 
-        // Peut-on livrer ce jour ? Oui si jour ouvré OU si DLV<=1
-        const peutLivrer=!isWEDay||(dlvPdv<=1);
+        // Peut-on livrer ce jour ?
+        const peutLivrer=(!isWEDay)||(dlvPdv<=1);
 
-        // On calcule combien de jours le stock actuel va tenir
-        // Si stock < ventes du jour ET on peut livrer : livrer maintenant
-        if(peutLivrer && stockPdvSim<venteJour){
-          // Calculer la quantité à livrer : couvrir dlvPdv jours à partir d'aujourd'hui
+        // Livrer si : peut livrer + stock ne couvre pas les ventes du jour + pas déjà livré aujourd'hui
+        if(peutLivrer && venteJour>0 && stockPdvSim<venteJour && d!==derniereLivraisonJour){
+          // Calculer besoin = ventes sur dlvPdv prochains jours livrables
           let besoin=0;
           for(let k=0;k<dlvPdv;k++){
             const fd=new Date(date);fd.setDate(fd.getDate()+k);
@@ -902,65 +900,62 @@ async function genererEtCreerBons(){
             if(fIsWE&&dlvPdv>1)continue;
             besoin+=pPrev[JOURS_SHORT[fji]]||0;
           }
-          // Déduire ce qui est déjà en stock PDV
+          // Quantité nette à livrer = besoin - stock PDV actuel
           const aLivrer=Math.max(0,Math.round(besoin-stockPdvSim));
-          if(aLivrer>0){
-            // Vérifier stock entrepôt
-            const stockEpDispo=Math.max(0,epStock[pid]||0);
-            const aLivrerEp=Math.min(aLivrer,stockEpDispo);
-            const manque=aLivrer-stockEpDispo;
+          if(aLivrer<=0){stockPdvSim=Math.max(0,stockPdvSim-venteJour);continue;}
 
-            if(aLivrerEp>0){
-              epStock[pid]=stockEpDispo-aLivrerEp;
-              if(!plan[dateStr])plan[dateStr]={};
-              if(!plan[dateStr][siteData.nom])plan[dateStr][siteData.nom]=[];
-              // Ajouter ou fusionner avec ligne existante
-              const existing=plan[dateStr][siteData.nom].find(l=>l.pid===pid);
-              if(existing)existing.qte+=aLivrerEp;
-              else plan[dateStr][siteData.nom].push({pid,nom:p.nom,qte:Math.round(aLivrerEp)});
-              stockPdvSim+=aLivrerEp;
-            }
+          // Allouer depuis stock entrepôt
+          const stockEpTotal=(epStocks[pid]?.qte||0);
+          const dejaAlloue=epAlloue[pid]||0;
+          const epRestant=Math.max(0,stockEpTotal-dejaAlloue);
+          const aLivrerEp=Math.min(aLivrer,epRestant);
+          const manque=aLivrer-epRestant;
 
-            if(manque>0&&p.aConditionner){
-              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
-              condNeeds[pid].manqueTot+=manque;
-            }
+          if(aLivrerEp>0){
+            epAlloue[pid]=(epAlloue[pid]||0)+aLivrerEp;
+            if(!plan[dateStr])plan[dateStr]={};
+            if(!plan[dateStr][siteData.nom])plan[dateStr][siteData.nom]=[];
+            const ex=plan[dateStr][siteData.nom].find(l=>l.pid===pid);
+            if(ex)ex.qte+=Math.round(aLivrerEp);
+            else plan[dateStr][siteData.nom].push({pid,nom:p.nom,qte:Math.round(aLivrerEp)});
+            stockPdvSim+=aLivrerEp;
+            derniereLivraisonJour=d;
+          }
+          if(manque>0&&p.aConditionner){
+            if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:stockEpTotal};
+            condNeeds[pid].manqueTot+=manque;
           }
         }
-
-        // Consommer les ventes du jour
+        // Consommer ventes du jour
         stockPdvSim=Math.max(0,stockPdvSim-venteJour);
       }
     }
   }
 
-  // Créer les commandes
+  // Créer les commandes dans Firebase
+  let nbBons=0,nbTickets=0;
   for(const [dateStr,sitesData] of Object.entries(plan).sort()){
     for(const [siteNom,lignes] of Object.entries(sitesData)){
-      if(lignes.length===0)continue;
-      const produitsTexte=lignes.map(l=>`${l.nom} × ${l.qte}`).join('\n');
+      if(!lignes.length)continue;
       await window.push(window.ref(window.db,'commandes'),{
-        site:siteNom,produits:produitsTexte,deadline:dateStr,
-        statut:'preparation',source:'auto',createdAt:Date.now()
+        site:siteNom,produits:lignes.map(l=>`${l.nom} × ${l.qte}`).join('\n'),
+        deadline:dateStr,statut:'preparation',source:'auto',createdAt:Date.now()
       });
       nbBons++;
     }
   }
-
-  // Tickets conditionnement groupés par produit
+  // Tickets conditionnement
   for(const [pid,info] of Object.entries(condNeeds)){
     if(info.manqueTot<=0)continue;
-    const dlvPdv=info.p.dlcPdv||7;
-    const prio=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
+    const prio=(info.p.dlcPdv||7)<=1?'urgent':(info.p.dlcPdv||7)<=2?'high':'normal';
     await window.push(window.ref(window.db,'conditionnement'),{
       produitId:pid,produitNom:info.p.nom,qte:Math.ceil(info.manqueTot),priorite:prio,
-      note:`Manque tous PDV sur ${HORIZON}j — stock entrepôt : ${info.stockInit}`,
+      note:`Manque sur ${HORIZON}j tous PDV — stock entrepôt : ${info.stockInit}`,
       done:false,createdAt:Date.now()
     });
     nbTickets++;
   }
-
-  const msg=`✓ ${nbBons} bon(s) · ${nbTickets} ticket(s) conditionnement`;
+  const msg=`✓ ${nbBons} livraison(s) planifiée(s) · ${nbTickets} ticket(s) conditionnement`;
   showToast(msg);if(statusEl)statusEl.textContent=msg;
   genererApercu();
 }
