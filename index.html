@@ -832,11 +832,25 @@ function genererApercu(){
 }
 
 async function genererEtCreerBons(){
-  const produits=getProduits();const stocks=getStocks();const previsions=getPrevisions();
+  const produits=getProduits();const stocks=getStocks();
   if(!window.db||!window.push||!window.ref){showToast('Firebase non prêt');return;}
   const ep=getEntrepot();const pdvEntries=getPdvs();
   if(!ep||pdvEntries.length===0){showToast('Configurez vos sites');return;}
   const statusEl=document.getElementById('bons-status');
+  if(statusEl)statusEl.textContent='Chargement prévisions...';
+
+  // ETAPE 1: Charger TOUTES les prévisions depuis Firebase pour tous les PDVs
+  const previsions={};
+  await new Promise(function(resolve){
+    window.onValue(window.ref(window.db,'previsions'),function(snap){
+      const data=snap.val()||{};
+      Object.assign(previsions,data);
+      // Mettre à jour le state aussi
+      window.state.previsions=data;
+      resolve();
+    },{onlyOnce:true});
+  });
+
   if(statusEl)statusEl.textContent='Nettoyage...';
 
   // Supprimer anciens bons auto + tickets auto
@@ -849,9 +863,8 @@ async function genererEtCreerBons(){
 
   const epKey=ep[1].nom.replace(/ /g,'_');
   const epStocks=stocks[epKey]||{};
-  // Stock entrepôt disponible PAR PRODUIT — partagé entre tous PDVs et tous jours
   const epRestant={};
-  Object.entries(produits).forEach(([pid])=>{epRestant[pid]=Math.max(0,(epStocks[pid]?.qte)||0);});
+  Object.entries(produits).forEach(function([pid]){epRestant[pid]=Math.max(0,(epStocks[pid]?epStocks[pid].qte:0)||0);});
 
   if(statusEl)statusEl.textContent='Calcul...';
 
@@ -909,8 +922,10 @@ async function genererEtCreerBons(){
               if(ex)ex.qte+=livre;else plan[ds][siteData.nom].push({pid,nom:p.nom,qte:livre});
               stockPdv+=livre;
             }
-            if(manque>0&&p.aConditionner){
-              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?.qte||0};
+            // Only add conditionnement need if within product's DLC window
+            const dlvEp2=p.dlcEntrepot||14;
+            if(manque>0&&p.aConditionner&&d<dlvEp2){
+              if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocks[pid]?epStocks[pid].qte:0||0};
               condNeeds[pid].manqueTot+=manque;
             }
           }
