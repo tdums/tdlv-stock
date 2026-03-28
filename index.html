@@ -410,14 +410,14 @@ const PRIO_ORDER={urgent:0,high:1,normal:2,low:3};
 const PRIO_COLORS={urgent:'red',high:'amber',normal:'blue',low:'var(--text3)'};
 const PRIO_LABELS={urgent:'Urgent','high':'Haute',normal:'Normale',low:'Basse'};
 
-function fmtDate(){const d=new Date();const days=['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];const months=['jan','fév','mar','avr','mai','jun','jul','aoû','sep','oct','nov','déc'];return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+function fmtDate(){const d=new Date();const days=['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];const months=['jan','fév','mar','avr','mai','jun','jul','aoû','sep','oct','nov','déc'];return days[d.getDay()]+' '+d.getDate()+' '+months[d.getMonth()];}
 function fmtDeadline(dateStr){
   if(!dateStr)return 'Non définie';
   const d=new Date(dateStr+'T12:00:00');
   const days=['DIMANCHE','LUNDI','MARDI','MERCREDI','JEUDI','VENDREDI','SAMEDI'];
   const months=['JANVIER','FÉVRIER','MARS','AVRIL','MAI','JUIN','JUILLET','AOÛT','SEPTEMBRE','OCTOBRE','NOVEMBRE','DÉCEMBRE'];
   return days[d.getDay()]+' '+d.getDate()+' '+months[d.getMonth()]+' '+d.getFullYear();
-}}
+}
 function todayStr(){return new Date().toISOString().split('T')[0];}
 function todayIdx(){const d=new Date().getDay();return d===0?6:d-1;}
 function addDays(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
@@ -808,7 +808,7 @@ function genererApercu(){
   Object.entries(produits).filter(([k,v])=>v.statut!=='archive').forEach(([pid,p])=>{
     const dlcPdv=p.dlcPdv||7;const dlcEp=p.dlcEntrepot||14;
     if(isWE&&dlcPdv>1)return;
-    const joursP=Math.min(dlcEp,3);
+    const joursP=Math.min(dlcEp,7);// Planifier sur toute la fenêtre DLC entrepôt (max 7j)
     let besoinTotal=0;
     pdvs.forEach(([siteId])=>{const pPrev=(previsions[siteId]||{})[pid]||{};for(let i=0;i<joursP;i++){const ji=(tIdx+i)%7;if(ji>=5&&dlcPdv>1)continue;besoinTotal+=(pPrev[JOURS_SHORT[ji]]||0);}});
     if(besoinTotal<=0)return;
@@ -858,12 +858,11 @@ async function genererEtCreerBons(){
   // Collect conditionnement needs grouped by product
   const condNeeds={};
 
-  // Build day-by-day delivery plan over 7 days
-  // For each day, for each PDV, calculate what to deliver based on previsions
-  const DAYS_AHEAD=7;
+  // Build day-by-day delivery plan
+  // Each product is only planned within its dlcEntrepot window
   const plan={};// plan[dateStr][siteNom] = [{pid, nom, qte}]
 
-  for(let d=0;d<DAYS_AHEAD;d++){
+  for(let d=0;d<7;d++){
     const date=addDays(d);
     const dateD=new Date(date+'T12:00:00');
     const dow=dateD.getDay();// 0=Sun,6=Sat
@@ -875,15 +874,19 @@ async function genererEtCreerBons(){
       for(const [pid,p] of Object.entries(produits)){
         if(p.statut==='archive')continue;
         const dlcPdv=p.dlcPdv||7;
+        const dlcEp=p.dlcEntrepot||14;
 
-        // Week-end : livrer uniquement les produits DLC <= 1
+        // Ne planifier que dans la fenêtre DLC entrepôt du produit
+        if(d>=dlcEp)continue;
+
+        // Week-end : livrer uniquement les produits DLC PDV <= 1
         if((dow===0||dow===6)&&dlcPdv>1)continue;
 
         const pPrev=(previsions[siteId]||{})[pid]||{};
         const venteJour=pPrev[JOURS_SHORT[jourIdx]]||0;
         if(venteJour<=0)continue;
 
-        // What we can deliver = min(besoin, stock entrepôt restant)
+        // Ce qu'on peut livrer = min(besoin du jour, stock entrepôt restant)
         const stockDispo=Math.max(0,epStock[pid]||0);
         const aLivrer=Math.min(venteJour,stockDispo);
         const manque=venteJour-stockDispo;
@@ -893,7 +896,7 @@ async function genererEtCreerBons(){
           epStock[pid]=stockDispo-aLivrer;
         }
 
-        // Track conditionnement needs for missing stock
+        // Ticket conditionnement pour le manque
         if(manque>0&&p.aConditionner){
           if(!condNeeds[pid])condNeeds[pid]={p,manqueTot:0,stockInit:epStocksInit[pid]?.qte||0};
           condNeeds[pid].manqueTot+=manque;
