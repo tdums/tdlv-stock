@@ -309,6 +309,11 @@ showToast('Connecté en temps réel');
       <div class="form-group"><label class="form-label">Poids vente (kg)</label><input class="form-input" id="p-poids-vente" type="number" placeholder="ex: 1"/></div>
     </div>
     <div class="form-group"><label class="form-label">DLV point de vente (j)</label><input class="form-input" id="p-dlc-pdv" type="number" placeholder="ex: 7"/></div>
+    <div class="form-group">
+      <label class="form-label">Casiers dédiés par PDV</label>
+      <div id="p-casiers-pdv" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;"></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px;">Nombre de casiers en vitrine par point de vente</div>
+    </div>
     <div class="form-check" style="margin-bottom:12px;">
       <input type="checkbox" id="p-conditionner"/><label for="p-conditionner">À conditionner par nos soins</label>
     </div>
@@ -511,15 +516,23 @@ function renderProduits(){
       </div>
     </div>`).join('');
 }
+function renderCasiersFields(casiers){
+  const pdvs=getPdvs();const el=document.getElementById('p-casiers-pdv');if(!el)return;
+  el.innerHTML=pdvs.map(([sid,sv])=>{
+    const val=(casiers&&casiers[sid])||0;
+    return `<div><div style="font-size:10px;color:var(--text2);margin-bottom:3px;font-family:'IBM Plex Mono',monospace;">${sv.nom}</div><input type="number" min="0" value="${val}" id="p-casier-${sid}" class="form-input" style="padding:8px;text-align:center;"/></div>`;
+  }).join('');
+}
 function openModalProduit(id){
-  if(id){const p=getProduits()[id];document.getElementById('p-nom').value=p.nom;document.getElementById('p-unite-achat').value=p.uniteAchat;document.getElementById('p-poids').value=p.poidsAchat||'';document.getElementById('p-unite-vente').value=p.uniteVente;document.getElementById('p-poids-vente').value=p.poidsVente||'';document.getElementById('p-dlc-pdv').value=p.dlcPdv||'';document.getElementById('p-conditionner').checked=p.aConditionner||false;document.getElementById('p-categorie').value=p.categorie||'autre';document.getElementById('modal-produit').dataset.editId=id;}
-  else{document.getElementById('modal-produit').dataset.editId='';document.getElementById('p-nom').value='';}
+  if(id){const p=getProduits()[id];document.getElementById('p-nom').value=p.nom;document.getElementById('p-unite-achat').value=p.uniteAchat;document.getElementById('p-poids').value=p.poidsAchat||'';document.getElementById('p-unite-vente').value=p.uniteVente;document.getElementById('p-poids-vente').value=p.poidsVente||'';document.getElementById('p-dlc-pdv').value=p.dlcPdv||'';document.getElementById('p-conditionner').checked=p.aConditionner||false;document.getElementById('p-categorie').value=p.categorie||'autre';document.getElementById('modal-produit').dataset.editId=id;renderCasiersFields(p.casiers||{});}
+  else{document.getElementById('modal-produit').dataset.editId='';document.getElementById('p-nom').value='';renderCasiersFields({});}
   openModal('modal-produit');
 }
 function editProduit(id){openModalProduit(id);}
 async function saveProduit(){
   const editId=document.getElementById('modal-produit').dataset.editId;
-  const data={nom:document.getElementById('p-nom').value.trim(),uniteAchat:document.getElementById('p-unite-achat').value,poidsAchat:parseFloat(document.getElementById('p-poids').value)||null,uniteVente:document.getElementById('p-unite-vente').value,poidsVente:parseFloat(document.getElementById('p-poids-vente').value)||null,dlcPdv:parseInt(document.getElementById('p-dlc-pdv').value)||null,aConditionner:document.getElementById('p-conditionner').checked,categorie:document.getElementById('p-categorie').value,statut:'actif'};
+  const casiers={};getPdvs().forEach(([sid])=>{const el=document.getElementById('p-casier-'+sid);if(el)casiers[sid]=parseInt(el.value)||0;});
+  const data={nom:document.getElementById('p-nom').value.trim(),uniteAchat:document.getElementById('p-unite-achat').value,poidsAchat:parseFloat(document.getElementById('p-poids').value)||null,uniteVente:document.getElementById('p-unite-vente').value,poidsVente:parseFloat(document.getElementById('p-poids-vente').value)||null,dlcPdv:parseInt(document.getElementById('p-dlc-pdv').value)||null,aConditionner:document.getElementById('p-conditionner').checked,categorie:document.getElementById('p-categorie').value,statut:'actif',casiers};
   if(!data.nom){showToast('Nom requis');return;}
   if(editId)await window.update(window.ref(window.db,'produits/'+editId),data);
   else await window.push(window.ref(window.db,'produits'),data);
@@ -778,7 +791,8 @@ function selectInvSite(site,el){invSite=site;document.querySelectorAll('#inv-sit
 function renderInvList(){
   const produits=getProduits();const siteKey=invSite.replace(/ /g,'_');const siteStocks=(getStocks()[siteKey]||{});
   const items=Object.entries(produits).filter(([k,v])=>v.statut!=='archive');
-  document.getElementById('inv-list').innerHTML=items.length===0?'<div class="empty">Aucun produit</div>':`<div class="card">${items.map(([k,v])=>{const q=(siteStocks[k]||{}).qte||0;return `<div class="list-item"><div class="list-main"><div class="list-title">${v.nom}</div><div class="list-sub">Théorique: ${q} ${v.uniteVente}</div></div><div style="display:flex;align-items:center;gap:8px;"><input type="number" value="${q}" min="0" id="inv-${k}" style="width:70px;padding:6px 8px;background:var(--bg3);border:0.5px solid var(--border2);border-radius:var(--radius-sm);color:var(--text);font-size:14px;text-align:center;"/><button class="btn btn-primary btn-sm" onclick="saveInv('${k}','${v.nom}')">✓</button></div></div>`;}).join('')}</div><button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="saveAllInv()">Valider tout</button>`;
+  document.getElementById('inv-list').innerHTML=items.length===0?'<div class="empty">Aucun produit</div>':`<div class="card">${items.map(([k,v])=>{const q=(siteStocks[k]||{}).qte||0;const siteEntry2=Object.entries(getSites()).find(([,sv])=>sv.nom===invSite);const sid2=siteEntry2?siteEntry2[0]:null;const nbCas=(v.casiers&&sid2&&v.casiers[sid2])||0;const qReel=q+nbCas;const casLabel=nbCas>0?` + ${nbCas} casiers = ${qReel} réel`:'';
+    return `<div class="list-item"><div class="list-main"><div class="list-title">${v.nom}</div><div class="list-sub">Stock: ${q}${casLabel} ${v.uniteVente}</div></div><div style="display:flex;align-items:center;gap:8px;"><input type="number" value="${q}" id="inv-${k}" style="width:70px;padding:6px 8px;background:var(--bg3);border:0.5px solid var(--border2);border-radius:var(--radius-sm);color:var(--text);font-size:14px;text-align:center;"/><button class="btn btn-primary btn-sm" onclick="saveInv('${k}','${v.nom}')">✓</button></div></div>`;}).join('')}</div><button class="btn btn-primary btn-full" style="margin-top:10px;" onclick="saveAllInv()">Valider tout</button>`;
 }
 async function saveInv(pid,nom){const qte=parseFloat(document.getElementById('inv-'+pid).value)||0;await window.set(window.ref(window.db,`stocks/${invSite.replace(/ /g,'_')}/${pid}`),{qte,updatedAt:Date.now()});showToast(`${nom} mis à jour ✓`);}
 async function saveAllInv(){
@@ -891,13 +905,15 @@ async function genererEtCreerBons(){
 
   if(statusEl)statusEl.textContent='Calcul...';
 
-  // Stock PDV simulé
+  // Stock PDV simulé = stock déclaré + casiers vitrine
   const pdvStock={};
   for(const [sid,sv] of pdvEntries){
     pdvStock[sid]={};
-    for(const [pid] of Object.entries(produits)){
+    for(const [pid,p] of Object.entries(produits)){
       const sk=sv.nom.replace(/ /g,'_');
-      pdvStock[sid][pid]=(stocksFresh[sk]&&stocksFresh[sk][pid])?stocksFresh[sk][pid].qte||0:0;
+      const stockDeclare=(stocksFresh[sk]&&stocksFresh[sk][pid])?stocksFresh[sk][pid].qte||0:0;
+      const nbCasiers=(p.casiers&&p.casiers[sid])||0;
+      pdvStock[sid][pid]=stockDeclare+nbCasiers;
     }
   }
 
@@ -952,9 +968,10 @@ async function genererEtCreerBons(){
           // Jour ouvré
           const vente=getVente(sid,pid,ji);
           if(dlvPdv<=1){
-            // DLV=1j: livrer chaque jour si besoin
-            if(vente>0&&stock<vente){
-              const aLivrer=vente-stock;
+            // DLV=1j: livrer chaque jour si besoin + reconstituer casiers
+            const nbCasiers1=(p.casiers&&p.casiers[sid])||0;
+            if(vente>0&&stock<vente+nbCasiers1){
+              const aLivrer=Math.max(0,(vente+nbCasiers1)-stock);
               pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
               if(!plan[ds])plan[ds]={};
               if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
@@ -965,7 +982,10 @@ async function genererEtCreerBons(){
             // DLV>1j: livrer quand stock insuffisant
             // Vendredi: anticiper WE + début semaine suivante
             const joursACouvrir=isVen?dlvPdv+2:dlvPdv;
-            const besoin=besoinJoursOuvres(sid,pid,joursACouvrir,curDate);
+            const nbCasiers=(p.casiers&&p.casiers[sid])||0;
+            // Besoin = ventes sur période + casiers (pour qu'ils soient pleins en fin de période)
+            const besoinVentes=besoinJoursOuvres(sid,pid,joursACouvrir,curDate);
+            const besoin=besoinVentes+nbCasiers;
             const aLivrer=Math.max(0,Math.round(besoin-stock));
             if(aLivrer>0){
               pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
@@ -1008,8 +1028,10 @@ async function genererEtCreerBons(){
     let besoinTotal=0;let stockPdvsTotal=0;
     for(const [sid,sv] of pdvEntries){
       const sk=sv.nom.replace(/ /g,'_');
-      stockPdvsTotal+=(stocksFresh[sk]&&stocksFresh[sk][pid])?stocksFresh[sk][pid].qte||0:0;
-      besoinTotal+=besoinJoursOuvres(sid,pid,dlvPdv,startDate);
+      const stockDeclare2=(stocksFresh[sk]&&stocksFresh[sk][pid])?stocksFresh[sk][pid].qte||0:0;
+      const nbCas2=(p.casiers&&p.casiers[sid])||0;
+      stockPdvsTotal+=stockDeclare2+nbCas2;
+      besoinTotal+=besoinJoursOuvres(sid,pid,dlvPdv,startDate)+nbCas2;
     }
     const manque=Math.max(0,Math.ceil(besoinTotal-stockPdvsTotal));
     if(manque>0){
