@@ -847,22 +847,32 @@ async function savePrev(){
 }
 
 function genererApercu(){
-  const produits=getProduits();const stocks=getStocks();const previsions=getPrevisions();const sites=getSites();
+  const produits=getProduits();const stocks=getStocks();const previsions=getPrevisions();
   const el=document.getElementById('prev-bons');if(!el)return;
-  const ep=getEntrepot();const pdvs=getPdvs();
-  if(!ep||pdvs.length===0){el.innerHTML='<div class="empty">Configurez vos sites dans Paramètres</div>';return;}
-  const tIdx=todayIdx();const isWE=tIdx>=5;const epKey=ep[1].nom.replace(/ /g,'_');const epStocks=stocks[epKey]||{};
+  const pdvs=getPdvs();
+  if(pdvs.length===0){el.innerHTML='<div class="empty">Configurez vos sites dans Paramètres</div>';return;}
+  const tIdx=todayIdx();const isWE=tIdx>=5;
   const bons=[];
   Object.entries(produits).filter(([k,v])=>v.statut!=='archive').forEach(([pid,p])=>{
-    const dlvPdv2=p.dlcPdv||7;
-    if(isWE&&dlvPdv2>1)return;
-    const joursP=Math.min(dlvPdv,7);
-    let besoinTotal=0;
-    pdvs.forEach(([siteId])=>{const pPrev=(previsions[siteId]||{})[pid]||{};for(let i=0;i<joursP;i++){const ji=(tIdx+i)%7;if(ji>=5&&dlvPdv2>1)continue;besoinTotal+=(pPrev[JOURS_SHORT[ji]]||0);}});
+    const dlvPdv=p.dlcPdv||7;
+    if(isWE&&dlvPdv>1)return;
+    // Besoin = ventes DLV jours (jours ouvrés) + casiers à reconstituer
+    // Stock réel = stock déclaré + casiers actuellement pleins
+    let besoinTotal=0;let stockReel=0;
+    pdvs.forEach(([siteId,siteData])=>{
+      const sk=siteData.nom.replace(/ /g,'_');
+      const declare=(stocks[sk]&&stocks[sk][pid])?stocks[sk][pid].qte||0:0;
+      const nbCas=(p.casiers&&p.casiers[siteId])||0;
+      stockReel+=declare+nbCas;
+      const pPrev=(previsions[siteId]||{})[pid]||{};
+      let ventesP=0;
+      for(let i=0;i<dlvPdv;i++){const ji=(tIdx+i)%7;if(ji>=5&&dlvPdv>1)continue;ventesP+=(pPrev[JOURS_SHORT[ji]]||0);}
+      besoinTotal+=ventesP+nbCas;
+    });
+    const manque=Math.max(0,Math.ceil(besoinTotal-stockReel));
     if(besoinTotal<=0)return;
-    const manque=besoinTotal;
-    let urgence=manque>0&&dlcPdv<=1?'urgent':manque>0&&dlcPdv<=2?'high':'normal';
-    bons.push({pid,p,stockEp,besoinTotal,manque,urgence,joursP});
+    const urgence=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
+    bons.push({pid,p,besoinTotal,stockReel,manque,urgence,dlvPdv});
   });
   bons.sort((a,b)=>PRIO_ORDER[a.urgence]-PRIO_ORDER[b.urgence]);
   if(bons.length===0){el.innerHTML='<div class="empty">Stocks suffisants ✓</div>';return;}
@@ -871,9 +881,8 @@ function genererApercu(){
     return `<div class="card" style="border-left:3px solid var(--${c});">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div><div style="font-size:14px;font-weight:500;">${b.p.nom}</div>
-          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Besoin ${b.joursP}j : ${b.besoinTotal} · Entrepôt : ${b.stockEp}</div>
-          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'Manque : '+b.manque+' unités':'Stock suffisant ✓'}</div>
-          ${b.manque>0&&b.p.aConditionner?'<div style="font-size:11px;color:var(--amber);margin-top:2px;">Conditionnement nécessaire</div>':''}
+          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Besoin ${b.dlvPdv}j : ${b.besoinTotal} · Stock réel PDVs : ${b.stockReel}</div>
+          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'À conditionner : '+b.manque+' unités':'Stock suffisant ✓'}</div>
         </div>
         <span class="badge badge-${c}">${b.urgence==='urgent'?'URGENT':b.urgence==='high'?'PRIORITÉ':'OK'}</span>
       </div>
