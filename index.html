@@ -449,11 +449,12 @@ function getStocks(){return window.state.stocks||{};}
 function getPrevisions(){return window.state.previsions||{};}
 function venteJourPdv(siteId,pid,jourIdx){return ((getPrevisions()[siteId]||{})[pid]||{})[JOURS_SHORT[jourIdx]]||0;}
 function stockActuel(siteKey,pid){return ((getStocks()[siteKey]||{})[pid]||{}).qte||0;}
-function niveauStock(qte,venteJour){
+function niveauStock(qte,venteJour,dlvPdv){
   if(venteJour===0)return{n:'green',l:'OK'};
   const j=qte/venteJour;
-  if(j<1)return{n:'red',l:'CRITIQUE'};
-  if(j<2)return{n:'amber',l:'BAS'};
+  const dlv=dlvPdv||7;
+  if(j<dlv*0.5)return{n:'red',l:'CRITIQUE'};
+  if(j<dlv)return{n:'amber',l:'BAS'};
   return{n:'green',l:'OK'};
 }
 
@@ -470,7 +471,7 @@ function renderDashboard(){
       const qte=stockActuel(sk,pid);
       const vj=venteJourPdv(siteId,pid,tIdx);
       if(vj===0)return;
-      const {n,l}=niveauStock(qte,vj);
+      const {n,l}=niveauStock(qte,vj,p.dlcPdv);
       if(n==='green')return;
       aC++;
       aHtml+=`<div class="alert alert-${n}"><div class="alert-text"><strong>${p.nom}</strong> — ${siteData.nom}<div class="alert-sub">${qte} ${p.uniteVente} · ${(qte/vj).toFixed(1)}j de ventes</div></div><span class="badge badge-${n}">${l}</span></div>`;
@@ -547,7 +548,7 @@ function renderStocksSite(){
     const qte=stockActuel(siteKey,k);
     let niv,lab;
     if(isEntrepot){niv=qte<5?'red':qte<20?'amber':'green';lab=niv==='red'?'CRITIQUE':niv==='amber'?'BAS':'OK';}
-    else{const vj=siteId?venteJourPdv(siteId,k,tIdx):0;const r=niveauStock(qte,vj);niv=r.n;lab=r.l;}
+    else{const vj=siteId?venteJourPdv(siteId,k,tIdx):0;const r=niveauStock(qte,vj,v.dlcPdv);niv=r.n;lab=r.l;}
     return `<div class="list-item">
       <div class="priority p-${niv==='red'?'urgent':niv==='amber'?'high':'normal'}"></div>
       <div class="list-main"><div class="list-title">${v.nom}</div><div class="list-sub">${v.categorie||''} · DLV ${v.dlcPdv||'?'}j</div></div>
@@ -661,24 +662,72 @@ async function deleteCond(id){await window.remove(window.ref(window.db,'conditio
 let prepFilter='preparation';
 function filterCommandes(f,el){prepFilter=f;document.querySelectorAll('#tab-prep .tab-btn').forEach(b=>b.classList.remove('active'));el.classList.add('active');renderPrep();}
 function renderPrep(){
-  const items=Object.entries(window.state.commandes||{}).filter(([k,v])=>v.statut===prepFilter);
+  const commandes=window.state.commandes||{};
+  const items=Object.entries(commandes).filter(([k,v])=>v.statut===prepFilter);
   const today=todayStr();
-  document.getElementById('prep-list').innerHTML=items.length===0?'<div class="empty">Aucune commande</div>':items.map(([k,v])=>{
-    const isUrgent=v.deadline&&v.deadline<=today;
-    return `<div class="card" style="border-left:3px solid ${isUrgent?'var(--red)':'var(--border2)'};">
-      <div class="card-header">
-        <div><div class="list-title">${v.site}${v.source==='auto'?' <span class="badge badge-blue" style="font-size:9px;">AUTO</span>':''}</div><div class="list-sub" style="color:${isUrgent?'var(--red)':'var(--text2)'};">Deadline : ${fmtDeadline(v.deadline)}</div></div>
-        <span class="badge ${v.statut==='preparation'?'badge-amber':v.statut==='pret'?'badge-green':'badge-blue'}">${v.statut==='preparation'?'En cours':v.statut==='pret'?'Prête':'Livrée'}</span>
-      </div>
-      <div style="font-size:13px;color:var(--text2);white-space:pre-line;margin-bottom:10px;">${v.produits||''}</div>
-      <div style="display:flex;gap:8px;">
-        ${v.statut==='preparation'?`<button class="btn btn-primary btn-sm" onclick="setCommandeStatut('${k}','pret')">Marquer prête ✓</button>`:''}
-        ${v.statut==='pret'?`<button class="btn btn-secondary btn-sm" onclick="setCommandeStatut('${k}','livre')">Livrée ✓</button>`:''}
-        <button class="btn btn-danger btn-sm" onclick="deleteCommande('${k}')">Suppr.</button>
-      </div>
-    </div>`;}).join('');
-  const nb=Object.values(window.state.commandes||{}).filter(v=>v.statut==='pret').length;
-  document.getElementById('badge-prep').style.display=nb>0?'flex':'none';document.getElementById('badge-prep').textContent=nb;
+  const el=document.getElementById('prep-list');
+
+  if(items.length===0){el.innerHTML='<div class="empty">Aucune commande</div>';}
+  else if(prepFilter==='livre'){
+    // Vue simple pour livrées
+    el.innerHTML=items.map(([k,v])=>`
+      <div class="card" style="opacity:0.6;">
+        <div class="card-header">
+          <div><div class="list-title">${v.site}</div><div class="list-sub">${fmtDeadline(v.deadline)}</div></div>
+          <span class="badge badge-blue">Livrée</span>
+        </div>
+        <div style="font-size:12px;color:var(--text3);white-space:pre-line;">${v.produits||''}</div>
+        <button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="deleteCommande('${k}')">Suppr.</button>
+      </div>`).join('');
+  } else {
+    // Vue agenda : grouper par date
+    const byDate={};
+    items.forEach(([k,v])=>{
+      const d=v.deadline||'9999-99-99';
+      if(!byDate[d])byDate[d]=[];
+      byDate[d].push([k,v]);
+    });
+    let html='';
+    Object.keys(byDate).sort().forEach(dateStr=>{
+      const isToday=dateStr===today;
+      const isTomorrow=dateStr===addDays(1);
+      const isPast=dateStr<today;
+      let dayLabel=fmtDeadline(dateStr);
+      let dayColor='var(--text2)';
+      let dayBg='var(--bg3)';
+      let dayTag='';
+      if(isPast||isToday){dayColor='var(--red)';dayBg='rgba(239,68,68,0.08)';dayTag='<span class="badge badge-red" style="font-size:9px;">URGENT</span>';}
+      else if(isTomorrow){dayColor='var(--amber)';dayBg='rgba(245,158,11,0.08)';dayTag='<span class="badge badge-amber" style="font-size:9px;">DEMAIN</span>';}
+
+      html+=`<div style="background:${dayBg};border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;border:0.5px solid var(--border);">`;
+      html+=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">`;
+      html+=`<div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:500;color:${dayColor};">${dayLabel}</div>${dayTag}`;
+      html+=`</div>`;
+
+      byDate[dateStr].forEach(([k,v])=>{
+        const autoTag=v.source==='auto'?'<span class="badge badge-blue" style="font-size:9px;margin-left:6px;">AUTO</span>':'';
+        const statutColor=v.statut==='pret'?'var(--green)':'var(--text2)';
+        const statutLabel=v.statut==='pret'?'Prête ✓':'En cours';
+        html+=`<div style="background:var(--bg2);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;">`;
+        html+=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">`;
+        html+=`<div style="font-size:14px;font-weight:500;color:var(--text);">${v.site}${autoTag}</div>`;
+        html+=`<span style="font-size:11px;color:${statutColor};font-family:'IBM Plex Mono',monospace;">${statutLabel}</span>`;
+        html+=`</div>`;
+        html+=`<div style="font-size:12px;color:var(--text2);white-space:pre-line;margin-bottom:8px;">${v.produits||''}</div>`;
+        html+=`<div style="display:flex;gap:6px;">`;
+        if(v.statut==='preparation')html+=`<button class="btn btn-primary btn-sm" onclick="setCommandeStatut('${k}','pret')">Marquer prête ✓</button>`;
+        if(v.statut==='pret')html+=`<button class="btn btn-secondary btn-sm" onclick="setCommandeStatut('${k}','livre')">Livrée ✓</button>`;
+        html+=`<button class="btn btn-danger btn-sm" onclick="deleteCommande('${k}')">Suppr.</button>`;
+        html+=`</div></div>`;
+      });
+      html+=`</div>`;
+    });
+    el.innerHTML=html;
+  }
+
+  const nb=Object.values(commandes).filter(v=>v.statut==='pret').length;
+  document.getElementById('badge-prep').style.display=nb>0?'flex':'none';
+  document.getElementById('badge-prep').textContent=nb;
 }
 function openModalCommande(){
   document.getElementById('cmd-site').innerHTML=getPdvs().map(([k,v])=>`<option value="${v.nom}">${v.nom}</option>`).join('');
