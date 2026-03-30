@@ -110,6 +110,7 @@ body{display:flex;flex-direction:column;max-width:520px;margin:0 auto;height:100
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import{getDatabase,ref,onValue,set,push,update,remove}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import{getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 const firebaseConfig={
   apiKey:"AIzaSyCkBeqQwsya83kBYYDBAg0UaOHhRdLy8cc",
   authDomain:"tdlv-stock.firebaseapp.com",
@@ -121,13 +122,34 @@ const firebaseConfig={
 };
 const app=initializeApp(firebaseConfig);
 const db=getDatabase(app);
+const auth=getAuth(app);
 window.db=db;window.ref=ref;window.set=set;window.push=push;window.update=update;window.remove=remove;window.onValue=onValue;
+window.auth=auth;window.signOut=signOut;
 window.state={produits:{},stocks:{},conditionnement:{},commandes:{},sites:{},previsions:{}};
-function syncRef(path,key){onValue(ref(db,path),snap=>{window.state[key]=snap.val()||{};window.renderAll&&window.renderAll(key);});}
-syncRef('produits','produits');syncRef('stocks','stocks');syncRef('conditionnement','conditionnement');
-syncRef('commandes','commandes');syncRef('previsions','previsions');syncRef('sites','sites');
-document.getElementById('sync-dot').classList.remove('off');
-showToast('Connecté en temps réel');
+
+function startSync(){
+  function syncRef(path,key){onValue(ref(db,path),snap=>{window.state[key]=snap.val()||{};window.renderAll&&window.renderAll(key);});}
+  syncRef('produits','produits');syncRef('stocks','stocks');syncRef('conditionnement','conditionnement');
+  syncRef('commandes','commandes');syncRef('previsions','previsions');syncRef('sites','sites');
+  document.getElementById('sync-dot').classList.remove('off');
+  showToast('Connecté en temps réel');
+}
+
+onAuthStateChanged(auth,user=>{
+  if(user){
+    window.currentUser=user;
+    document.getElementById('login-screen').style.display='none';
+    startSync();
+    checkLock();
+  } else {
+    window.currentUser=null;
+    document.getElementById('login-screen').style.display='flex';
+    document.querySelector('.header').style.display='none';
+    document.querySelector('.content').style.display='none';
+    document.querySelector('.nav').style.display='none';
+    document.getElementById('lock-screen').style.display='none';
+  }
+});
 </script>
 
 <div class="header">
@@ -229,6 +251,10 @@ showToast('Connecté en temps réel');
 
 <!-- PARAMÈTRES -->
 <div class="section" id="tab-params">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <div style="font-size:12px;color:var(--text2);" id="params-user-email"></div>
+    <button class="btn btn-danger btn-sm" onclick="doLogout()">Déconnexion</button>
+  </div>
   <div class="slabel">Sites</div>
   <div class="card"><div id="params-sites-list"></div></div>
   <div style="display:flex;gap:8px;margin-top:8px;align-items:flex-end;">
@@ -363,6 +389,22 @@ showToast('Connecté en temps réel');
 
 <div class="toast" id="toast"></div>
 
+<div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:600;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px;">
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text3);letter-spacing:0.1em;margin-bottom:48px;">GESTION STOCKS · TDLV</div>
+  <div style="width:100%;max-width:320px;">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:16px;color:var(--text);margin-bottom:6px;">Connexion</div>
+    <div style="font-size:13px;color:var(--text3);margin-bottom:28px;">Entrez vos identifiants</div>
+    <div class="form-group"><label class="form-label">Email</label>
+      <input class="form-input" id="login-email" type="email" placeholder="votre@email.fr" autocomplete="email" inputmode="email"/>
+    </div>
+    <div class="form-group"><label class="form-label">Mot de passe</label>
+      <input class="form-input" id="login-password" type="password" placeholder="••••••••" autocomplete="current-password"/>
+    </div>
+    <div id="login-error" style="color:var(--red);font-size:13px;margin-bottom:12px;display:none;"></div>
+    <button class="btn btn-primary btn-full" onclick="doLogin()">Se connecter</button>
+  </div>
+</div>
+
 <div class="lock-screen" id="lock-screen" style="display:none;">
   <div class="lock-logo">GESTION STOCKS</div>
   <div class="lock-title">Code PIN</div>
@@ -395,6 +437,27 @@ const PRIO_ORDER={urgent:0,high:1,normal:2,low:3};
 const PRIO_COLORS={urgent:'red',high:'amber',normal:'blue',low:'var(--text3)'};
 const PRIO_LABELS={urgent:'Urgent','high':'Haute',normal:'Normale',low:'Basse'};
 
+async function doLogin(){
+  const email=document.getElementById('login-email').value.trim();
+  const pwd=document.getElementById('login-password').value;
+  const errEl=document.getElementById('login-error');
+  errEl.style.display='none';
+  if(!email||!pwd){errEl.textContent='Email et mot de passe requis';errEl.style.display='block';return;}
+  try{
+    const {signInWithEmailAndPassword:siwep}=await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+    await siwep(window.auth,email,pwd);
+  }catch(e){
+    errEl.textContent=e.code==='auth/wrong-password'||e.code==='auth/invalid-credential'?'Identifiants incorrects':
+      e.code==='auth/user-not-found'?'Utilisateur inconnu':
+      e.code==='auth/too-many-requests'?'Trop de tentatives, réessayez plus tard':'Erreur de connexion';
+    errEl.style.display='block';
+  }
+}
+async function doLogout(){
+  if(!confirm('Se déconnecter ?'))return;
+  await window.signOut(window.auth);
+  showToast('Déconnecté');
+}
 function fmtDate(){const d=new Date();const days=['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];const months=['jan','fév','mar','avr','mai','jun','jul','aoû','sep','oct','nov','déc'];return days[d.getDay()]+' '+d.getDate()+' '+months[d.getMonth()];}
 function fmtDeadline(dateStr){
   if(!dateStr)return 'Non définie';
@@ -1064,6 +1127,8 @@ async function genererEtCreerBons(){
 
 function debugPrevisions(){var p=getPrevisions();var pdvs=getPdvs();var msg="PDVs:"+pdvs.length;pdvs.forEach(function(e){var sid=e[0];var sd=e[1];var sp=p[sid]||{};msg+=" | "+sd.nom+"="+Object.keys(sp).length+"produits";});msg+=" | prevKeys:"+Object.keys(p).join(",");alert(msg);}function renderParams(){
   renderPinSettings();
+  const uel=document.getElementById('params-user-email');
+  if(uel&&window.currentUser)uel.textContent=window.currentUser.email;
   const entries=Object.entries(getSites());
   document.getElementById('params-sites-list').innerHTML=entries.length===0?'<div class="empty" style="padding:12px 0">Aucun site</div>':entries.map(([k,v])=>`
     <div class="list-item">
@@ -1082,8 +1147,9 @@ async function deleteSite(id){if(!window.db){showToast('Firebase non prêt');ret
 let pinBuffer='',pinUnlocked=false;
 function getPinEnabled(){return localStorage.getItem('pin_enabled')==='true';}
 function getSavedPin(){return localStorage.getItem('pin_code')||'';}
-function checkLock(){if(!getPinEnabled()){pinUnlocked=true;return;}if(pinUnlocked)return;document.getElementById('lock-screen').style.display='flex';document.querySelector('.header').style.display='none';document.querySelector('.content').style.display='none';document.querySelector('.nav').style.display='none';}
-function unlock(){pinUnlocked=true;document.getElementById('lock-screen').style.display='none';document.querySelector('.header').style.display='';document.querySelector('.content').style.display='';document.querySelector('.nav').style.display='';}
+function checkLock(){if(!getPinEnabled()){pinUnlocked=true;showApp();return;}if(pinUnlocked){showApp();return;}document.getElementById('lock-screen').style.display='flex';}
+function showApp(){document.querySelector('.header').style.display='';document.querySelector('.content').style.display='';document.querySelector('.nav').style.display='';}
+function unlock(){pinUnlocked=true;document.getElementById('lock-screen').style.display='none';showApp();}
 function pinPress(d){if(pinBuffer.length>=4)return;pinBuffer+=d;updateDots();if(pinBuffer.length===4)setTimeout(checkPin,150);}
 function pinDel(){pinBuffer=pinBuffer.slice(0,-1);updateDots();}
 function updateDots(){for(let i=0;i<4;i++){const dot=document.getElementById('dot-'+i);if(!dot)continue;dot.classList.remove('filled','error');if(i<pinBuffer.length)dot.classList.add('filled');}}
