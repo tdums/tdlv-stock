@@ -1145,7 +1145,8 @@ async function genererEtCreerBons(){
             const ji=dow===0?6:dow-1;
             const vente=getVente(sid,pid,ji);
             const besoin=vente+nbCasiers;
-            if(vente>0&&stock<besoin){
+            // Livrer si : ventes à couvrir OU casiers pas pleins
+            if(stock<besoin){
               const aLivrer=Math.max(0,besoin-stock);
               pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
               if(!plan[ds])plan[ds]={};
@@ -1173,7 +1174,12 @@ async function genererEtCreerBons(){
             let doitLivrer=false;
             let nbJoursLivraison=dlvPdv;
 
-            if(stock<=0){
+            // RÈGLE PRIORITAIRE : casiers doivent être 100% pleins
+            // stock = stockDeclare + nbCasiers. Si stock < nbCasiers → casiers pas pleins
+            if(stock<nbCasiers){
+              // Casiers pas pleins : livrer immédiatement pour les remplir
+              doitLivrer=true;
+            } else if(stock<=0){
               // Stock épuisé : livrer immédiatement
               doitLivrer=true;
             } else if(joursRestants<=seuilAlerte){
