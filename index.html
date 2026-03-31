@@ -35,6 +35,7 @@ body{display:flex;flex-direction:column;max-width:520px;margin:0 auto;height:100
 .badge-amber{background:var(--amber-bg);color:var(--amber);}
 .badge-red{background:var(--red-bg);color:var(--red);}
 .badge-blue{background:var(--blue-bg);color:var(--blue);}
+.badge-purple{background:var(--purple-bg);color:var(--purple);}
 .metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:14px;}
 .metric{background:var(--bg2);border:0.5px solid var(--border);border-radius:var(--radius-sm);padding:12px 10px;text-align:center;}
 .metric-n{font-size:24px;font-weight:300;font-family:'IBM Plex Mono',monospace;}
@@ -784,18 +785,20 @@ function renderPrep(){
 
       byDate[dateStr].forEach(([k,v])=>{
         const autoTag=v.source==='auto'?'<span class="badge badge-blue" style="font-size:9px;margin-left:6px;">AUTO</span>':'';
+        const modifTag=v.dateModifiee?'<span class="badge badge-purple" style="font-size:9px;margin-left:6px;">MODIFIÉ</span>':'';
         const statutColor=v.statut==='pret'?'var(--green)':'var(--text2)';
         const statutLabel=v.statut==='pret'?'Prête ✓':'En cours';
         html+=`<div style="background:var(--bg2);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;">`;
         html+=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">`;
-        html+=`<div style="font-size:14px;font-weight:500;color:var(--text);">${v.site}${autoTag}</div>`;
+        html+=`<div style="font-size:14px;font-weight:500;color:var(--text);">${v.site}${autoTag}${modifTag}</div>`;
         html+=`<span style="font-size:11px;color:${statutColor};font-family:'IBM Plex Mono',monospace;">${statutLabel}</span>`;
         html+=`</div>`;
+        if(v.noteDate)html+=`<div style="font-size:11px;color:var(--purple);margin-bottom:6px;font-style:italic;">📝 ${v.noteDate}</div>`;
         html+=`<div style="font-size:12px;color:var(--text2);white-space:pre-line;margin-bottom:8px;">${v.produits||''}</div>`;
-        html+=`<div style="display:flex;gap:6px;flex-wrap:wrap;">`;
+        html+=`<div style="display:flex;gap:6px;">`;
         if(v.statut==='preparation')html+=`<button class="btn btn-primary btn-sm" onclick="setCommandeStatut('${k}','pret')">Marquer prête ✓</button>`;
         if(v.statut==='pret')html+=`<button class="btn btn-secondary btn-sm" onclick="setCommandeStatut('${k}','livre')">Livrée ✓</button>`;
-        html+=`<button class="btn btn-secondary btn-sm" onclick="changerDateCommande('${k}','${v.deadline||''}')">Changer date</button>`;
+        html+=`<button class="btn btn-secondary btn-sm" onclick="modifierDateCommande('${k}','${v.deadline||''}')">📅 Date</button>`;
         html+=`<button class="btn btn-danger btn-sm" onclick="deleteCommande('${k}')">Suppr.</button>`;
         html+=`</div></div>`;
       });
@@ -824,25 +827,35 @@ async function setCommandeStatut(id,statut){
   if(statut==='livre')showToast('Livraison confirmée ✓');
 }
 async function deleteCommande(id){await window.remove(window.ref(window.db,'commandes/'+id));}
-async function changerDateCommande(id,currentDate){
-  // Créer un input date temporaire pour sélection mobile-friendly
-  const input=document.createElement('input');
-  input.type='date';
-  input.value=currentDate||todayStr();
-  input.style.position='fixed';input.style.top='-9999px';
-  document.body.appendChild(input);
-  input.addEventListener('change',async function(){
-    const newDate=input.value;
-    if(newDate&&newDate!==currentDate){
-      await window.update(window.ref(window.db,'commandes/'+id),{deadline:newDate,updatedAt:Date.now()});
-      showToast('Date modifiée → '+fmtDeadline(newDate));
-    }
-    document.body.removeChild(input);
-  });
-  input.addEventListener('blur',function(){
-    setTimeout(()=>{if(document.body.contains(input))document.body.removeChild(input);},300);
-  });
-  input.showPicker?input.showPicker():input.click();
+async function modifierDateCommande(id,currentDate){
+  // Ouvrir un mini-modal avec un input date
+  const overlay=document.createElement('div');
+  overlay.className='modal-overlay show';
+  overlay.innerHTML=`<div class="modal" style="max-width:380px;">
+    <div class="modal-title">Modifier la date de livraison <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button></div>
+    <div class="form-group"><label class="form-label">Date suggérée</label>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:8px;">${fmtDeadline(currentDate)}</div>
+    </div>
+    <div class="form-group"><label class="form-label">Nouvelle date</label>
+      <input class="form-input" type="date" id="edit-date-input" value="${currentDate}"/>
+    </div>
+    <div class="form-group"><label class="form-label">Note pour le livreur (optionnel)</label>
+      <input class="form-input" id="edit-date-note" placeholder="ex: Reporté car pont du 1er mai"/>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="confirmerModifDate('${id}')">Confirmer</button>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+}
+async function confirmerModifDate(id){
+  const newDate=document.getElementById('edit-date-input').value;
+  const note=document.getElementById('edit-date-note').value.trim();
+  if(!newDate){showToast('Sélectionnez une date');return;}
+  const updates={deadline:newDate,dateModifiee:true,updatedAt:Date.now()};
+  if(note)updates.noteDate=note;
+  await window.update(window.ref(window.db,'commandes/'+id),updates);
+  document.querySelector('.modal-overlay:last-of-type').remove();
+  showToast('Date de livraison modifiée ✓');
 }
 
 // ── LIVRAISONS ──
@@ -943,39 +956,29 @@ function genererApercu(){
   Object.entries(produits).filter(([k,v])=>v.statut!=='archive').forEach(([pid,p])=>{
     const dlvPdv=p.dlcPdv||7;
     if(isWE&&dlvPdv>1)return;
-    const joursACouvrir=isVen&&dlvPdv>1?Math.max(dlvPdv,dlvPdv+2):dlvPdv;
-    let besoinTotal=0;let stockReel=0;let joursMinCouverts=Infinity;
+    // Vendredi DLV>1j : couvrir DLV + 2 jours (WE)
+    const joursACouvrir=isVen&&dlvPdv>1?dlvPdv+2:dlvPdv;
+    let besoinTotal=0;let stockReel=0;
     pdvs.forEach(([siteId,siteData])=>{
       const sk=siteData.nom.replace(/ /g,'_');
       const declare=(stocks[sk]&&stocks[sk][pid])?stocks[sk][pid].qte||0:0;
       const nbCas=(p.casiers&&p.casiers[siteId])||0;
-      const sr=declare+nbCas;
-      stockReel+=sr;
+      stockReel+=declare+nbCas;
       const pPrev=(previsions[siteId]||{})[pid]||{};
-      // Compter joursACouvrir jours ouvrés
       let ventesP=0;let jCompt=0;let offset=0;
       while(jCompt<joursACouvrir){
         const ji=(tIdx+offset)%7;
         if(dlvPdv<=1){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
         else if(ji<5){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
-        offset++;if(offset>40)break;
+        offset++;
+        if(offset>30)break;
       }
       besoinTotal+=ventesP+nbCas;
-      // Calculer combien de jours ouvrés le stock couvre dans ce PDV
-      let jcPdv=0;let simS=sr;
-      for(let o2=0;o2<60&&simS>0;o2++){
-        const ji2=(tIdx+o2)%7;
-        if(dlvPdv<=1||(ji2<5)){
-          const v2=pPrev[JOURS_SHORT[ji2]]||0;
-          simS-=v2;if(simS>=0)jcPdv++;else break;
-        }
-      }
-      joursMinCouverts=Math.min(joursMinCouverts,jcPdv);
     });
     const manque=Math.max(0,Math.ceil(besoinTotal-stockReel));
     if(besoinTotal<=0)return;
-    const urgence=joursMinCouverts<2?'urgent':joursMinCouverts<dlvPdv?'high':'normal';
-    bons.push({pid,p,besoinTotal,stockReel,manque,urgence,dlvPdv,joursCouverts:joursMinCouverts});
+    const urgence=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
+    bons.push({pid,p,besoinTotal,stockReel,manque,urgence,dlvPdv});
   });
   bons.sort((a,b)=>PRIO_ORDER[a.urgence]-PRIO_ORDER[b.urgence]);
   if(bons.length===0){el.innerHTML='<div class="empty">Stocks suffisants ✓</div>';return;}
@@ -984,8 +987,8 @@ function genererApercu(){
     return `<div class="card" style="border-left:3px solid var(--${c});">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div><div style="font-size:14px;font-weight:500;">${b.p.nom}</div>
-          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Stock couvre ~${b.joursCouverts}j · DLV ${b.dlvPdv}j · Besoin total : ${b.besoinTotal}</div>
-          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'À livrer/conditionner : '+b.manque+' unités':'Stock suffisant ✓'}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Besoin ${b.dlvPdv}j : ${b.besoinTotal} · Stock réel PDVs : ${b.stockReel}</div>
+          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'À conditionner : '+b.manque+' unités':'Stock suffisant ✓'}</div>
         </div>
         <span class="badge badge-${c}">${b.urgence==='urgent'?'URGENT':b.urgence==='high'?'PRIORITÉ':'OK'}</span>
       </div>
@@ -1019,6 +1022,34 @@ async function genererEtCreerBons(){
 
   setStatus('Calcul...');
 
+  // ── JOURS FÉRIÉS FRANCE ──
+  const year=new Date().getFullYear();
+  function getJoursFeries(y){
+    // Pâques (algorithme de Meeus)
+    const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4;
+    const f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-d-g+15)%30;
+    const i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7;
+    const m=Math.floor((a+11*h+22*l)/451);
+    const month=Math.floor((h+l-7*m+114)/31)-1,day=((h+l-7*m+114)%31)+1;
+    const paques=new Date(y,month,day);
+    const lundiPaques=new Date(paques);lundiPaques.setDate(paques.getDate()+1);
+    const ascension=new Date(paques);ascension.setDate(paques.getDate()+39);
+    const lundiPentecote=new Date(paques);lundiPentecote.setDate(paques.getDate()+50);
+    const fmt=d=>d.toISOString().split('T')[0];
+    return new Set([
+      `${y}-01-01`,`${y}-05-01`,`${y}-05-08`,`${y}-07-14`,`${y}-08-15`,
+      `${y}-11-01`,`${y}-11-11`,`${y}-12-25`,
+      fmt(lundiPaques),fmt(ascension),fmt(lundiPentecote)
+    ]);
+  }
+  const joursFeries=new Set([...getJoursFeries(year),...getJoursFeries(year+1)]);
+  function isJourFerie(dateStr){return joursFeries.has(dateStr);}
+  function isNonLivrable(dateObj){
+    const dow=dateObj.getDay();
+    const ds=dateObj.toISOString().split('T')[0];
+    return dow===0||dow===6||isJourFerie(ds);
+  }
+
   // Stock PDV simulé = stock déclaré + casiers vitrine
   const pdvStock={};
   for(const [sid,sv] of pdvEntries){
@@ -1033,107 +1064,154 @@ async function genererEtCreerBons(){
 
   const JOURS_S=['lun','mar','mer','jeu','ven','sam','dim'];
   function getVente(sid,pid,dow){return ((previsions[sid]||{})[pid]||{})[JOURS_S[dow]]||0;}
-  function besoinJoursOuvres(sid,pid,dlvPdv,fromDate){
-    let total=0;let jours=0;let d=new Date(fromDate);
-    while(jours<dlvPdv){
+
+  // Calculer les ventes cumulées sur N jours calendaires à partir d'une date
+  // Pour DLV>1j : on ne compte que les jours ouvrés (lun-ven hors fériés)
+  // Pour DLV<=1j : on compte tous les jours
+  function ventesCalendaires(sid,pid,dlvPdv,fromDate,nbJoursCalendaires){
+    let total=0;let d=new Date(fromDate);
+    for(let i=0;i<nbJoursCalendaires;i++){
       const dow=d.getDay();const ji=dow===0?6:dow-1;
-      if(dlvPdv<=1){total+=getVente(sid,pid,ji);jours++;}
-      else if(dow>=1&&dow<=5){total+=getVente(sid,pid,ji);jours++;}
+      const ds=d.toISOString().split('T')[0];
+      if(dlvPdv<=1){
+        // DLV courte : ventes tous les jours
+        total+=getVente(sid,pid,ji);
+      } else {
+        // DLV longue : ventes seulement jours ouvrés (hors WE et fériés)
+        if(dow>=1&&dow<=5&&!isJourFerie(ds)){
+          total+=getVente(sid,pid,ji);
+        }
+      }
       d.setDate(d.getDate()+1);
     }
     return total;
   }
 
+  // Calculer combien de jours calendaires le stock actuel peut couvrir
+  function joursAvantEpuisement(sid,pid,dlvPdv,stock,fromDate){
+    let restant=stock;let d=new Date(fromDate);let jours=0;
+    while(restant>0&&jours<60){
+      const dow=d.getDay();const ji=dow===0?6:dow-1;
+      const ds=d.toISOString().split('T')[0];
+      let vente=0;
+      if(dlvPdv<=1){vente=getVente(sid,pid,ji);}
+      else{if(dow>=1&&dow<=5&&!isJourFerie(ds))vente=getVente(sid,pid,ji);}
+      restant-=vente;
+      d.setDate(d.getDate()+1);
+      jours++;
+    }
+    return jours;
+  }
+
+  // Trouver le prochain jour livrable à partir d'une date
+  function prochainJourLivrable(fromDate){
+    let d=new Date(fromDate);
+    while(isNonLivrable(d)){d.setDate(d.getDate()+1);}
+    return d;
+  }
+
+  // Compter les jours calendaires jusqu'au prochain jour livrable après une date
+  // (pour savoir combien de jours couvrir quand la livraison précède un pont/WE)
+  function joursJusquAuProchainLivrable(fromDate){
+    let d=new Date(fromDate);d.setDate(d.getDate()+1);
+    let count=1;
+    while(isNonLivrable(d)){d.setDate(d.getDate()+1);count++;}
+    return count;
+  }
+
   // plan[dateStr][siteNom] = [{pid,nom,qte}]
   const plan={};
-  const HORIZON=30;// horizon étendu pour couvrir les longues DLV
+  const HORIZON=30;// Horizon étendu pour DLV longues
   const startDate=new Date();startDate.setHours(12,0,0,0);
-  const SEUIL_ANTICIP=2;// déclencher livraison quand stock couvre < 2 jours ouvrés
 
-  // Fonction: combien de jours ouvrés le stock couvre-t-il à partir d'une date ?
-  function joursCouverts(sid,pid,stock,fromDate){
-    let jc=0;let sim=stock;
-    for(let off=0;off<60&&sim>0;off++){
-      const fd=new Date(fromDate);fd.setDate(fd.getDate()+off);
-      const fdow=fd.getDay();
-      if(fdow>=1&&fdow<=5){
-        const v=getVente(sid,pid,fdow-1);
-        sim-=v;
-        if(sim>=0)jc++;else break;
-      }
-    }
-    return jc;
-  }
+  for(const [pid,p] of Object.entries(produits)){
+    if(p.statut==='archive')continue;
+    const dlvPdv=p.dlcPdv||7;
 
-  function ajouterPlan(ds,siteNom,pid,nom,qte){
-    if(!plan[ds])plan[ds]={};
-    if(!plan[ds][siteNom])plan[ds][siteNom]=[];
-    const ex=plan[ds][siteNom].find(l=>l.pid===pid);
-    if(ex)ex.qte+=qte;else plan[ds][siteNom].push({pid,nom,qte});
-  }
-
-  for(let d=0;d<HORIZON;d++){
-    const curDate=new Date(startDate);curDate.setDate(curDate.getDate()+d);
-    const dow=curDate.getDay();// 0=dim,6=sam
-    const isWE=dow===0||dow===6;
-    const isVen=dow===5;
-    const ds=curDate.toISOString().split('T')[0];
-
-    for(const [pid,p] of Object.entries(produits)){
-      if(p.statut==='archive')continue;
-      const dlvPdv=p.dlcPdv||7;
-
-      for(const [sid,sv] of pdvEntries){
+    for(const [sid,sv] of pdvEntries){
+      // Simuler jour par jour sur l'horizon
+      for(let d=0;d<HORIZON;d++){
+        const curDate=new Date(startDate);curDate.setDate(curDate.getDate()+d);
+        const dow=curDate.getDay();
+        const ds=curDate.toISOString().split('T')[0];
+        const isWE=dow===0||dow===6;
+        const isFerie=isJourFerie(ds);
         const stock=pdvStock[sid][pid]||0;
-        const ji=dow===0?6:dow-1;
         const nbCasiers=(p.casiers&&p.casiers[sid])||0;
-        const venteAuj=getVente(sid,pid,ji);
 
-        if(isWE){
-          // WE: seulement DLV<=1j (ultra-frais)
-          if(dlvPdv<=1&&venteAuj>0&&stock<venteAuj+nbCasiers){
-            const aLivrer=Math.max(0,Math.ceil(venteAuj+nbCasiers-stock));
-            pdvStock[sid][pid]+=aLivrer;
-            ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
-          }
-        } else if(dlvPdv<=1){
-          // Jour ouvré, DLV=1j: livrer chaque jour ouvré
-          if(venteAuj>0&&stock<venteAuj+nbCasiers){
-            const aLivrer=Math.max(0,Math.ceil(venteAuj+nbCasiers-stock));
-            pdvStock[sid][pid]+=aLivrer;
-            ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
+        if(dlvPdv<=1){
+          // ── DLV COURTE (≤1j) : livrer tous les jours y compris WE ──
+          if(!isFerie){// pas de livraison les fériés
+            const ji=dow===0?6:dow-1;
+            const vente=getVente(sid,pid,ji);
+            const besoin=vente+nbCasiers;
+            if(vente>0&&stock<besoin){
+              const aLivrer=Math.max(0,besoin-stock);
+              pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
+              if(!plan[ds])plan[ds]={};
+              if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
+              const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
+              if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
+            }
           }
         } else {
-          // DLV>1j — REGROUPEMENT MAXIMAL
-          // Calculer combien de jours ouvrés le stock actuel couvre
-          const jc=joursCouverts(sid,pid,stock,curDate);
+          // ── DLV LONGUE (>1j) : regrouper au maximum ──
+          // Pas de livraison WE ni fériés
+          if(isWE||isFerie){/* rien */}
+          else {
+            // Vérifier si le stock va s'épuiser dans les 2 prochains jours ouvrés
+            // OU si c'est le dernier jour ouvré avant un pont/WE et qu'il faut couvrir
+            const joursRestants=joursAvantEpuisement(sid,pid,dlvPdv,stock,curDate);
+            const seuilAlerte=2;// déclencher 1-2 jours avant épuisement
 
-          let doitLivrer=false;
-          // Règle 1: livrer quand stock couvre < 2 jours ouvrés de ventes
-          if(jc<SEUIL_ANTICIP&&venteAuj>0)doitLivrer=true;
-          // Règle 2: vendredi — vérifier que le stock couvre au minimum le WE + lundi
-          if(isVen&&jc<3&&venteAuj>0)doitLivrer=true;
-          // Règle 3: casiers pas pleins → livrer pour les remplir
-          if(stock<nbCasiers&&venteAuj>0)doitLivrer=true;
+            // Vérifier si demain est non-livrable (veille de WE/pont)
+            const demain=new Date(curDate);demain.setDate(demain.getDate()+1);
+            const dsDemain=demain.toISOString().split('T')[0];
+            const demainNonLivrable=isNonLivrable(demain);
+            const joursACouvrir=demainNonLivrable?joursJusquAuProchainLivrable(curDate):0;
 
-          if(doitLivrer){
-            // Livrer pour DLV jours ouvrés complets + anticiper WE le vendredi
-            const joursACouvrir=isVen?Math.max(dlvPdv,dlvPdv+2):dlvPdv;
-            const besoinVentes=besoinJoursOuvres(sid,pid,joursACouvrir,curDate);
-            const besoin=besoinVentes+nbCasiers;
-            const aLivrer=Math.max(0,Math.ceil(besoin-stock));
-            if(aLivrer>0){
-              pdvStock[sid][pid]+=aLivrer;
-              ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
+            let doitLivrer=false;
+            let nbJoursLivraison=dlvPdv;
+
+            if(stock<=0){
+              // Stock épuisé : livrer immédiatement
+              doitLivrer=true;
+            } else if(joursRestants<=seuilAlerte){
+              // Stock va s'épuiser dans 1-2 jours : livrer
+              doitLivrer=true;
+            }
+
+            // Veille de WE/pont/féries : vérifier qu'on a assez pour couvrir
+            if(demainNonLivrable){
+              const ventesWE=ventesCalendaires(sid,pid,dlvPdv,demain,joursACouvrir);
+              if(stock<ventesWE+nbCasiers){
+                doitLivrer=true;
+                // Couvrir au moins le pont + la DLV normale après
+                nbJoursLivraison=Math.max(dlvPdv,joursACouvrir+dlvPdv);
+              }
+            }
+
+            if(doitLivrer){
+              // Calculer les ventes sur la période DLV complète
+              const besoinVentes=ventesCalendaires(sid,pid,dlvPdv,curDate,nbJoursLivraison);
+              const besoin=besoinVentes+nbCasiers;
+              const aLivrer=Math.max(0,Math.ceil(besoin-stock));
+              if(aLivrer>0){
+                pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
+                if(!plan[ds])plan[ds]={};
+                if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
+                const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
+                if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
+              }
             }
           }
         }
-      }
 
-      // Consommer ventes du jour sur tous les PDVs
-      for(const [sid] of pdvEntries){
+        // Consommer ventes du jour
         const ji=dow===0?6:dow-1;
-        const vente=(isWE&&(p.dlcPdv||7)>1)?0:getVente(sid,pid,ji);
+        let vente=0;
+        if(dlvPdv<=1){vente=getVente(sid,pid,ji);}
+        else if(!isWE&&!isFerie){vente=getVente(sid,pid,ji);}
         pdvStock[sid][pid]=Math.max(0,(pdvStock[sid][pid]||0)-vente);
       }
     }
@@ -1152,9 +1230,7 @@ async function genererEtCreerBons(){
     }
   }
 
-  // Tickets conditionnement — TOUS les produits (pas de distinction fini/vrac)
-  // Besoin total tous PDVs sur DLV PDV jours à partir d'aujourd'hui
-  // Collecter les produits déjà conditionnés (done) aujourd'hui pour ne pas les recréer
+  // Tickets conditionnement — ne pas recréer si déjà validé aujourd'hui
   const condSnap=await new Promise(function(res){window.onValue(window.ref(window.db,'conditionnement'),function(s){res(s);},{onlyOnce:true});});
   const condFresh=condSnap.val()||{};
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
@@ -1166,9 +1242,20 @@ async function genererEtCreerBons(){
     }
   }
 
+  function besoinJoursOuvres(sid,pid,dlvPdv,fromDate){
+    let total=0;let jours=0;let d=new Date(fromDate);
+    while(jours<dlvPdv){
+      const dow=d.getDay();const ji=dow===0?6:dow-1;
+      const ds2=d.toISOString().split('T')[0];
+      if(dlvPdv<=1){total+=getVente(sid,pid,ji);jours++;}
+      else if(dow>=1&&dow<=5&&!isJourFerie(ds2)){total+=getVente(sid,pid,ji);jours++;}
+      d.setDate(d.getDate()+1);
+    }
+    return total;
+  }
+
   for(const [pid,p] of Object.entries(produits)){
     if(p.statut==='archive')continue;
-    // Si ce produit a déjà été conditionné (validé) aujourd'hui, ne pas recréer
     if(produitsDoneToday.has(pid))continue;
     const dlvPdv=p.dlcPdv||7;
     let besoinTotal=0;let stockPdvsTotal=0;
