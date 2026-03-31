@@ -338,6 +338,9 @@ onAuthStateChanged(auth,user=>{
       <div class="form-group"><label class="form-label">Poids vente (kg)</label><input class="form-input" id="p-poids-vente" type="number" placeholder="ex: 1"/></div>
     </div>
     <div class="form-group"><label class="form-label">DLV point de vente (j)</label><input class="form-input" id="p-dlc-pdv" type="number" placeholder="ex: 7"/></div>
+    <div class="form-group"><label class="form-label">DLV entrepôt (j)</label><input class="form-input" id="p-dlc-entrepot" type="number" placeholder="ex: 2"/>
+      <div style="font-size:11px;color:var(--text3);margin-top:4px;">Combien de jours avant livraison faut-il conditionner ? (ex: fraises=2j, pommes=7j)</div>
+    </div>
     <div class="form-group">
       <label class="form-label">Casiers dédiés par PDV</label>
       <div id="p-casiers-pdv" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;"></div>
@@ -575,6 +578,7 @@ function renderProduits(){
         <div>Achat: <span style="color:var(--text)">${v.uniteAchat}${v.poidsAchat?' '+v.poidsAchat+'kg':''}</span></div>
         <div>Vente: <span style="color:var(--text)">${v.uniteVente}${v.poidsVente?' '+v.poidsVente+'kg':''}</span></div>
         <div>DLV PDV: <span style="color:var(--text)">${v.dlcPdv||'?'}j</span></div>
+        <div>DLV Entrepôt: <span style="color:var(--text)">${v.dlcEntrepot||'?'}j</span></div>
       </div>
       <div style="display:flex;gap:8px;margin-top:10px;">
         <button class="btn btn-secondary btn-sm" onclick="editProduit('${k}')">Modifier</button>
@@ -590,15 +594,15 @@ function renderCasiersFields(casiers){
   }).join('');
 }
 function openModalProduit(id){
-  if(id){const p=getProduits()[id];document.getElementById('p-nom').value=p.nom;document.getElementById('p-unite-achat').value=p.uniteAchat;document.getElementById('p-poids').value=p.poidsAchat||'';document.getElementById('p-unite-vente').value=p.uniteVente;document.getElementById('p-poids-vente').value=p.poidsVente||'';document.getElementById('p-dlc-pdv').value=p.dlcPdv||'';document.getElementById('p-conditionner').checked=p.aConditionner||false;document.getElementById('p-categorie').value=p.categorie||'autre';document.getElementById('modal-produit').dataset.editId=id;renderCasiersFields(p.casiers||{});}
-  else{document.getElementById('modal-produit').dataset.editId='';document.getElementById('p-nom').value='';renderCasiersFields({});}
+  if(id){const p=getProduits()[id];document.getElementById('p-nom').value=p.nom;document.getElementById('p-unite-achat').value=p.uniteAchat;document.getElementById('p-poids').value=p.poidsAchat||'';document.getElementById('p-unite-vente').value=p.uniteVente;document.getElementById('p-poids-vente').value=p.poidsVente||'';document.getElementById('p-dlc-pdv').value=p.dlcPdv||'';document.getElementById('p-dlc-entrepot').value=p.dlcEntrepot||'';document.getElementById('p-conditionner').checked=p.aConditionner||false;document.getElementById('p-categorie').value=p.categorie||'autre';document.getElementById('modal-produit').dataset.editId=id;renderCasiersFields(p.casiers||{});}
+  else{document.getElementById('modal-produit').dataset.editId='';document.getElementById('p-nom').value='';document.getElementById('p-dlc-entrepot').value='';renderCasiersFields({});}
   openModal('modal-produit');
 }
 function editProduit(id){openModalProduit(id);}
 async function saveProduit(){
   const editId=document.getElementById('modal-produit').dataset.editId;
   const casiers={};getPdvs().forEach(([sid])=>{const el=document.getElementById('p-casier-'+sid);if(el)casiers[sid]=parseInt(el.value)||0;});
-  const data={nom:document.getElementById('p-nom').value.trim(),uniteAchat:document.getElementById('p-unite-achat').value,poidsAchat:parseFloat(document.getElementById('p-poids').value)||null,uniteVente:document.getElementById('p-unite-vente').value,poidsVente:parseFloat(document.getElementById('p-poids-vente').value)||null,dlcPdv:parseInt(document.getElementById('p-dlc-pdv').value)||null,aConditionner:document.getElementById('p-conditionner').checked,categorie:document.getElementById('p-categorie').value,statut:'actif',casiers};
+  const data={nom:document.getElementById('p-nom').value.trim(),uniteAchat:document.getElementById('p-unite-achat').value,poidsAchat:parseFloat(document.getElementById('p-poids').value)||null,uniteVente:document.getElementById('p-unite-vente').value,poidsVente:parseFloat(document.getElementById('p-poids-vente').value)||null,dlcPdv:parseInt(document.getElementById('p-dlc-pdv').value)||null,dlcEntrepot:parseInt(document.getElementById('p-dlc-entrepot').value)||null,aConditionner:document.getElementById('p-conditionner').checked,categorie:document.getElementById('p-categorie').value,statut:'actif',casiers};
   if(!data.nom){showToast('Nom requis');return;}
   if(editId)await window.update(window.ref(window.db,'produits/'+editId),data);
   else await window.push(window.ref(window.db,'produits'),data);
@@ -1236,7 +1240,8 @@ async function genererEtCreerBons(){
     }
   }
 
-  // Tickets conditionnement — ne pas recréer si déjà validé aujourd'hui
+  // Tickets conditionnement — basés sur les livraisons planifiées dans la fenêtre DLV Entrepôt
+  // Ne pas recréer si déjà validé aujourd'hui
   const condSnap=await new Promise(function(res){window.onValue(window.ref(window.db,'conditionnement'),function(s){res(s);},{onlyOnce:true});});
   const condFresh=condSnap.val()||{};
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
@@ -1248,40 +1253,61 @@ async function genererEtCreerBons(){
     }
   }
 
-  function besoinJoursOuvres(sid,pid,dlvPdv,fromDate){
-    let total=0;let jours=0;let d=new Date(fromDate);
-    while(jours<dlvPdv){
-      const dow=d.getDay();const ji=dow===0?6:dow-1;
-      const ds2=d.toISOString().split('T')[0];
-      if(dlvPdv<=1){total+=getVente(sid,pid,ji);jours++;}
-      else if(dow>=1&&dow<=5&&!isJourFerie(ds2)){total+=getVente(sid,pid,ji);jours++;}
-      d.setDate(d.getDate()+1);
+  // Calculer les besoins de conditionnement par produit
+  // en se basant sur les livraisons planifiées (plan) qui tombent dans la fenêtre DLV Entrepôt
+  const condParProduit={};// pid -> {qte, dates:[]}
+  const todayDs=startDate.toISOString().split('T')[0];
+
+  for(const [ds,sitesData] of Object.entries(plan)){
+    // Calculer combien de jours entre aujourd'hui et cette livraison
+    const dateLivraison=new Date(ds+'T12:00:00');
+    const diffMs=dateLivraison.getTime()-startDate.getTime();
+    const diffJours=Math.round(diffMs/(1000*60*60*24));
+
+    for(const [siteNom,lignes] of Object.entries(sitesData)){
+      for(const l of lignes){
+        const p=produits[l.pid];
+        if(!p||p.statut==='archive')continue;
+        // DLV Entrepôt : combien de jours avant la livraison peut-on conditionner
+        // Si non défini, on utilise DLV PDV comme avant (comportement par défaut)
+        const dlcEntrepot=p.dlcEntrepot||p.dlcPdv||7;
+
+        // Le ticket ne se génère que si la livraison tombe dans la fenêtre
+        // c'est-à-dire : diffJours <= dlcEntrepot
+        if(diffJours<=dlcEntrepot){
+          if(!condParProduit[l.pid]){
+            condParProduit[l.pid]={qte:0,nom:p.nom,dlcEntrepot,dates:[],dlcPdv:p.dlcPdv||7};
+          }
+          condParProduit[l.pid].qte+=l.qte;
+          if(!condParProduit[l.pid].dates.includes(ds))condParProduit[l.pid].dates.push(ds);
+        }
+      }
     }
-    return total;
   }
 
-  for(const [pid,p] of Object.entries(produits)){
-    if(p.statut==='archive')continue;
-    if(produitsDoneToday.has(pid))continue;
-    const dlvPdv=p.dlcPdv||7;
-    let besoinTotal=0;let stockPdvsTotal=0;
-    for(const [sid,sv] of pdvEntries){
-      const sk=sv.nom.replace(/ /g,'_');
-      const stockDeclare2=(stocksFresh[sk]&&stocksFresh[sk][pid])?stocksFresh[sk][pid].qte||0:0;
-      const nbCas2=(p.casiers&&p.casiers[sid])||0;
-      stockPdvsTotal+=stockDeclare2+nbCas2;
-      besoinTotal+=besoinJoursOuvres(sid,pid,dlvPdv,startDate)+nbCas2;
-    }
-    const manque=Math.max(0,Math.ceil(besoinTotal-stockPdvsTotal));
-    if(manque>0){
-      const prio=(dlvPdv<=1)?'urgent':(dlvPdv<=2)?'high':'normal';
-      await window.push(window.ref(window.db,'conditionnement'),{
-        produitId:pid,produitNom:p.nom,qte:manque,priorite:prio,
-        note:`Auto — besoin ${besoinTotal} sur ${dlvPdv}j, stock PDVs : ${stockPdvsTotal}`,
-        done:false,createdAt:Date.now()
-      });
-      nbTickets++;
-    }
+  // Soustraire le stock entrepôt actuel (ce qui est déjà conditionné en stock)
+  const epSk=ep[1].nom.replace(/ /g,'_');
+  for(const [pid,info] of Object.entries(condParProduit)){
+    if(produitsDoneToday.has(pid)){delete condParProduit[pid];continue;}
+    const stockEntrepot=(stocksFresh[epSk]&&stocksFresh[epSk][pid])?stocksFresh[epSk][pid].qte||0:0;
+    info.qte=Math.max(0,Math.ceil(info.qte-stockEntrepot));
+  }
+
+  // Créer les tickets
+  for(const [pid,info] of Object.entries(condParProduit)){
+    if(info.qte<=0)continue;
+    const prio=(info.dlcPdv<=1)?'urgent':(info.dlcPdv<=2)?'high':'normal';
+    const datesStr=info.dates.sort().map(d=>{
+      const dt=new Date(d+'T12:00:00');
+      const jours=['dim','lun','mar','mer','jeu','ven','sam'];
+      return jours[dt.getDay()]+' '+dt.getDate()+'/'+(dt.getMonth()+1);
+    }).join(', ');
+    await window.push(window.ref(window.db,'conditionnement'),{
+      produitId:pid,produitNom:info.nom,qte:info.qte,priorite:prio,
+      note:`Auto — livraisons: ${datesStr} (fenêtre ${info.dlcEntrepot}j)`,
+      done:false,createdAt:Date.now()
+    });
+    nbTickets++;
   }
 
   const msg=`✓ ${nbBons} livraison(s) · ${nbTickets} ticket(s) conditionnement`;
