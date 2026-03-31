@@ -792,9 +792,10 @@ function renderPrep(){
         html+=`<span style="font-size:11px;color:${statutColor};font-family:'IBM Plex Mono',monospace;">${statutLabel}</span>`;
         html+=`</div>`;
         html+=`<div style="font-size:12px;color:var(--text2);white-space:pre-line;margin-bottom:8px;">${v.produits||''}</div>`;
-        html+=`<div style="display:flex;gap:6px;">`;
+        html+=`<div style="display:flex;gap:6px;flex-wrap:wrap;">`;
         if(v.statut==='preparation')html+=`<button class="btn btn-primary btn-sm" onclick="setCommandeStatut('${k}','pret')">Marquer prête ✓</button>`;
         if(v.statut==='pret')html+=`<button class="btn btn-secondary btn-sm" onclick="setCommandeStatut('${k}','livre')">Livrée ✓</button>`;
+        html+=`<button class="btn btn-secondary btn-sm" onclick="changerDateCommande('${k}','${v.deadline||''}')">Changer date</button>`;
         html+=`<button class="btn btn-danger btn-sm" onclick="deleteCommande('${k}')">Suppr.</button>`;
         html+=`</div></div>`;
       });
@@ -823,6 +824,26 @@ async function setCommandeStatut(id,statut){
   if(statut==='livre')showToast('Livraison confirmée ✓');
 }
 async function deleteCommande(id){await window.remove(window.ref(window.db,'commandes/'+id));}
+async function changerDateCommande(id,currentDate){
+  // Créer un input date temporaire pour sélection mobile-friendly
+  const input=document.createElement('input');
+  input.type='date';
+  input.value=currentDate||todayStr();
+  input.style.position='fixed';input.style.top='-9999px';
+  document.body.appendChild(input);
+  input.addEventListener('change',async function(){
+    const newDate=input.value;
+    if(newDate&&newDate!==currentDate){
+      await window.update(window.ref(window.db,'commandes/'+id),{deadline:newDate,updatedAt:Date.now()});
+      showToast('Date modifiée → '+fmtDeadline(newDate));
+    }
+    document.body.removeChild(input);
+  });
+  input.addEventListener('blur',function(){
+    setTimeout(()=>{if(document.body.contains(input))document.body.removeChild(input);},300);
+  });
+  input.showPicker?input.showPicker():input.click();
+}
 
 // ── LIVRAISONS ──
 function renderLivr(){
@@ -922,31 +943,39 @@ function genererApercu(){
   Object.entries(produits).filter(([k,v])=>v.statut!=='archive').forEach(([pid,p])=>{
     const dlvPdv=p.dlcPdv||7;
     if(isWE&&dlvPdv>1)return;
-    // Besoin = ventes sur DLV jours ouvrés + casiers à reconstituer
-    // Vendredi: anticiper WE + début semaine suivante (DLV + 2)
-    const joursACouvrir=isVen&&dlvPdv>1?dlvPdv+2:dlvPdv;
-    let besoinTotal=0;let stockReel=0;
+    const joursACouvrir=isVen&&dlvPdv>1?Math.max(dlvPdv,dlvPdv+2):dlvPdv;
+    let besoinTotal=0;let stockReel=0;let joursMinCouverts=Infinity;
     pdvs.forEach(([siteId,siteData])=>{
       const sk=siteData.nom.replace(/ /g,'_');
       const declare=(stocks[sk]&&stocks[sk][pid])?stocks[sk][pid].qte||0:0;
       const nbCas=(p.casiers&&p.casiers[siteId])||0;
-      stockReel+=declare+nbCas;
+      const sr=declare+nbCas;
+      stockReel+=sr;
       const pPrev=(previsions[siteId]||{})[pid]||{};
-      // Compter joursACouvrir jours ouvrés à partir d'aujourd'hui
+      // Compter joursACouvrir jours ouvrés
       let ventesP=0;let jCompt=0;let offset=0;
       while(jCompt<joursACouvrir){
         const ji=(tIdx+offset)%7;
         if(dlvPdv<=1){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
         else if(ji<5){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
-        offset++;
-        if(offset>30)break;// sécurité
+        offset++;if(offset>40)break;
       }
       besoinTotal+=ventesP+nbCas;
+      // Calculer combien de jours ouvrés le stock couvre dans ce PDV
+      let jcPdv=0;let simS=sr;
+      for(let o2=0;o2<60&&simS>0;o2++){
+        const ji2=(tIdx+o2)%7;
+        if(dlvPdv<=1||(ji2<5)){
+          const v2=pPrev[JOURS_SHORT[ji2]]||0;
+          simS-=v2;if(simS>=0)jcPdv++;else break;
+        }
+      }
+      joursMinCouverts=Math.min(joursMinCouverts,jcPdv);
     });
     const manque=Math.max(0,Math.ceil(besoinTotal-stockReel));
     if(besoinTotal<=0)return;
-    const urgence=dlvPdv<=1?'urgent':dlvPdv<=2?'high':'normal';
-    bons.push({pid,p,besoinTotal,stockReel,manque,urgence,dlvPdv});
+    const urgence=joursMinCouverts<2?'urgent':joursMinCouverts<dlvPdv?'high':'normal';
+    bons.push({pid,p,besoinTotal,stockReel,manque,urgence,dlvPdv,joursCouverts:joursMinCouverts});
   });
   bons.sort((a,b)=>PRIO_ORDER[a.urgence]-PRIO_ORDER[b.urgence]);
   if(bons.length===0){el.innerHTML='<div class="empty">Stocks suffisants ✓</div>';return;}
@@ -955,8 +984,8 @@ function genererApercu(){
     return `<div class="card" style="border-left:3px solid var(--${c});">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div><div style="font-size:14px;font-weight:500;">${b.p.nom}</div>
-          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Besoin ${b.dlvPdv}j : ${b.besoinTotal} · Stock réel PDVs : ${b.stockReel}</div>
-          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'À conditionner : '+b.manque+' unités':'Stock suffisant ✓'}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px;">Stock couvre ~${b.joursCouverts}j · DLV ${b.dlvPdv}j · Besoin total : ${b.besoinTotal}</div>
+          <div style="font-size:12px;margin-top:3px;color:${b.manque>0?'var(--red)':'var(--green)'};">${b.manque>0?'À livrer/conditionner : '+b.manque+' unités':'Stock suffisant ✓'}</div>
         </div>
         <span class="badge badge-${c}">${b.urgence==='urgent'?'URGENT':b.urgence==='high'?'PRIORITÉ':'OK'}</span>
       </div>
@@ -1017,9 +1046,31 @@ async function genererEtCreerBons(){
 
   // plan[dateStr][siteNom] = [{pid,nom,qte}]
   const plan={};
-  const condNeeds={};
-  const HORIZON=14;
+  const HORIZON=30;// horizon étendu pour couvrir les longues DLV
   const startDate=new Date();startDate.setHours(12,0,0,0);
+  const SEUIL_ANTICIP=2;// déclencher livraison quand stock couvre < 2 jours ouvrés
+
+  // Fonction: combien de jours ouvrés le stock couvre-t-il à partir d'une date ?
+  function joursCouverts(sid,pid,stock,fromDate){
+    let jc=0;let sim=stock;
+    for(let off=0;off<60&&sim>0;off++){
+      const fd=new Date(fromDate);fd.setDate(fd.getDate()+off);
+      const fdow=fd.getDay();
+      if(fdow>=1&&fdow<=5){
+        const v=getVente(sid,pid,fdow-1);
+        sim-=v;
+        if(sim>=0)jc++;else break;
+      }
+    }
+    return jc;
+  }
+
+  function ajouterPlan(ds,siteNom,pid,nom,qte){
+    if(!plan[ds])plan[ds]={};
+    if(!plan[ds][siteNom])plan[ds][siteNom]=[];
+    const ex=plan[ds][siteNom].find(l=>l.pid===pid);
+    if(ex)ex.qte+=qte;else plan[ds][siteNom].push({pid,nom,qte});
+  }
 
   for(let d=0;d<HORIZON;d++){
     const curDate=new Date(startDate);curDate.setDate(curDate.getDate()+d);
@@ -1035,55 +1086,51 @@ async function genererEtCreerBons(){
       for(const [sid,sv] of pdvEntries){
         const stock=pdvStock[sid][pid]||0;
         const ji=dow===0?6:dow-1;
+        const nbCasiers=(p.casiers&&p.casiers[sid])||0;
+        const venteAuj=getVente(sid,pid,ji);
 
         if(isWE){
-          // WE: seulement DLV=1j
-          if(dlvPdv<=1){
-            const vente=getVente(sid,pid,ji);
-            if(vente>0&&stock<vente){
-              const aLivrer=vente-stock;
-              pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
-              if(!plan[ds])plan[ds]={};
-              if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
-              const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
-              if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
-            }
+          // WE: seulement DLV<=1j (ultra-frais)
+          if(dlvPdv<=1&&venteAuj>0&&stock<venteAuj+nbCasiers){
+            const aLivrer=Math.max(0,Math.ceil(venteAuj+nbCasiers-stock));
+            pdvStock[sid][pid]+=aLivrer;
+            ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
+          }
+        } else if(dlvPdv<=1){
+          // Jour ouvré, DLV=1j: livrer chaque jour ouvré
+          if(venteAuj>0&&stock<venteAuj+nbCasiers){
+            const aLivrer=Math.max(0,Math.ceil(venteAuj+nbCasiers-stock));
+            pdvStock[sid][pid]+=aLivrer;
+            ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
           }
         } else {
-          // Jour ouvré
-          const vente=getVente(sid,pid,ji);
-          if(dlvPdv<=1){
-            // DLV=1j: livrer chaque jour si besoin + reconstituer casiers
-            const nbCasiers1=(p.casiers&&p.casiers[sid])||0;
-            if(vente>0&&stock<vente+nbCasiers1){
-              const aLivrer=Math.max(0,(vente+nbCasiers1)-stock);
-              pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
-              if(!plan[ds])plan[ds]={};
-              if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
-              const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
-              if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
-            }
-          } else {
-            // DLV>1j: livrer si stock ne couvre pas la période DLV complète
-            // Vendredi: anticiper WE + début semaine suivante
-            const joursACouvrir=isVen?dlvPdv+2:dlvPdv;
-            const nbCasiers=(p.casiers&&p.casiers[sid])||0;
-            // Besoin = ventes sur période + casiers (pour qu'ils soient pleins en fin de période)
+          // DLV>1j — REGROUPEMENT MAXIMAL
+          // Calculer combien de jours ouvrés le stock actuel couvre
+          const jc=joursCouverts(sid,pid,stock,curDate);
+
+          let doitLivrer=false;
+          // Règle 1: livrer quand stock couvre < 2 jours ouvrés de ventes
+          if(jc<SEUIL_ANTICIP&&venteAuj>0)doitLivrer=true;
+          // Règle 2: vendredi — vérifier que le stock couvre au minimum le WE + lundi
+          if(isVen&&jc<3&&venteAuj>0)doitLivrer=true;
+          // Règle 3: casiers pas pleins → livrer pour les remplir
+          if(stock<nbCasiers&&venteAuj>0)doitLivrer=true;
+
+          if(doitLivrer){
+            // Livrer pour DLV jours ouvrés complets + anticiper WE le vendredi
+            const joursACouvrir=isVen?Math.max(dlvPdv,dlvPdv+2):dlvPdv;
             const besoinVentes=besoinJoursOuvres(sid,pid,joursACouvrir,curDate);
             const besoin=besoinVentes+nbCasiers;
-            const aLivrer=Math.max(0,Math.round(besoin-stock));
+            const aLivrer=Math.max(0,Math.ceil(besoin-stock));
             if(aLivrer>0){
-              pdvStock[sid][pid]=(pdvStock[sid][pid]||0)+aLivrer;
-              if(!plan[ds])plan[ds]={};
-              if(!plan[ds][sv.nom])plan[ds][sv.nom]=[];
-              const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
-              if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
+              pdvStock[sid][pid]+=aLivrer;
+              ajouterPlan(ds,sv.nom,pid,p.nom,aLivrer);
             }
           }
         }
       }
 
-      // Consommer ventes du jour
+      // Consommer ventes du jour sur tous les PDVs
       for(const [sid] of pdvEntries){
         const ji=dow===0?6:dow-1;
         const vente=(isWE&&(p.dlcPdv||7)>1)?0:getVente(sid,pid,ji);
