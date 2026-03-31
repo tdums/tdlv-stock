@@ -208,6 +208,8 @@ onAuthStateChanged(auth,user=>{
 
 <!-- PRÉPARATION -->
 <div class="section" id="tab-prep">
+  <button class="btn btn-primary btn-full" style="margin-bottom:14px;" onclick="genererEtCreerBons()">Générer les bons de commande par PDV</button>
+  <div id="bons-status-prep" style="margin-bottom:10px;font-size:12px;color:var(--text3);text-align:center;"></div>
   <div class="tab-row">
     <button class="tab-btn active" onclick="filterCommandes('preparation',this)">En préparation</button>
     <button class="tab-btn" onclick="filterCommandes('pret',this)">Prêtes</button>
@@ -915,12 +917,14 @@ function genererApercu(){
   const pdvs=getPdvs();
   if(pdvs.length===0){el.innerHTML='<div class="empty">Configurez vos sites dans Paramètres</div>';return;}
   const tIdx=todayIdx();const isWE=tIdx>=5;
+  const isVen=tIdx===4;
   const bons=[];
   Object.entries(produits).filter(([k,v])=>v.statut!=='archive').forEach(([pid,p])=>{
     const dlvPdv=p.dlcPdv||7;
     if(isWE&&dlvPdv>1)return;
-    // Besoin = ventes DLV jours (jours ouvrés) + casiers à reconstituer
-    // Stock réel = stock déclaré + casiers actuellement pleins
+    // Besoin = ventes sur DLV jours ouvrés + casiers à reconstituer
+    // Vendredi: anticiper WE + début semaine suivante (DLV + 2)
+    const joursACouvrir=isVen&&dlvPdv>1?dlvPdv+2:dlvPdv;
     let besoinTotal=0;let stockReel=0;
     pdvs.forEach(([siteId,siteData])=>{
       const sk=siteData.nom.replace(/ /g,'_');
@@ -928,8 +932,15 @@ function genererApercu(){
       const nbCas=(p.casiers&&p.casiers[siteId])||0;
       stockReel+=declare+nbCas;
       const pPrev=(previsions[siteId]||{})[pid]||{};
-      let ventesP=0;
-      for(let i=0;i<dlvPdv;i++){const ji=(tIdx+i)%7;if(ji>=5&&dlvPdv>1)continue;ventesP+=(pPrev[JOURS_SHORT[ji]]||0);}
+      // Compter joursACouvrir jours ouvrés à partir d'aujourd'hui
+      let ventesP=0;let jCompt=0;let offset=0;
+      while(jCompt<joursACouvrir){
+        const ji=(tIdx+offset)%7;
+        if(dlvPdv<=1){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
+        else if(ji<5){ventesP+=(pPrev[JOURS_SHORT[ji]]||0);jCompt++;}
+        offset++;
+        if(offset>30)break;// sécurité
+      }
       besoinTotal+=ventesP+nbCas;
     });
     const manque=Math.max(0,Math.ceil(besoinTotal-stockReel));
@@ -958,7 +969,9 @@ async function genererEtCreerBons(){
   const ep=getEntrepot();const pdvEntries=getPdvs();
   if(!ep||pdvEntries.length===0){showToast('Configurez vos sites');return;}
   const statusEl=document.getElementById('bons-status');
-  if(statusEl)statusEl.textContent='Chargement...';
+  const statusEl2=document.getElementById('bons-status-prep');
+  function setStatus(msg){if(statusEl)statusEl.textContent=msg;if(statusEl2)statusEl2.textContent=msg;}
+  setStatus('Chargement...');
 
   // Charger prévisions et stocks frais depuis Firebase
   const snapPrev=await new Promise(function(res){window.onValue(window.ref(window.db,'previsions'),function(s){res(s);},{onlyOnce:true});});
@@ -966,7 +979,7 @@ async function genererEtCreerBons(){
   const snapStocks=await new Promise(function(res){window.onValue(window.ref(window.db,'stocks'),function(s){res(s);},{onlyOnce:true});});
   const stocksFresh=snapStocks.val()||{};
 
-  if(statusEl)statusEl.textContent='Nettoyage...';
+  setStatus('Nettoyage...');
   // Supprimer anciens bons auto + tickets auto
   for(const [cid,cmd] of Object.entries(window.state.commandes||{}))
     if(cmd.source==='auto'&&cmd.statut==='preparation')
@@ -975,7 +988,7 @@ async function genererEtCreerBons(){
     if(!cond.done&&cond.note&&cond.note.startsWith('Auto'))
       await window.remove(window.ref(window.db,'conditionnement/'+cid));
 
-  if(statusEl)statusEl.textContent='Calcul...';
+  setStatus('Calcul...');
 
   // Stock PDV simulé = stock déclaré + casiers vitrine
   const pdvStock={};
@@ -1050,8 +1063,8 @@ async function genererEtCreerBons(){
               const ex=plan[ds][sv.nom].find(l=>l.pid===pid);
               if(ex)ex.qte+=aLivrer;else plan[ds][sv.nom].push({pid,nom:p.nom,qte:aLivrer});
             }
-          } else if(stock<vente){
-            // DLV>1j: livrer quand stock insuffisant
+          } else {
+            // DLV>1j: livrer si stock ne couvre pas la période DLV complète
             // Vendredi: anticiper WE + début semaine suivante
             const joursACouvrir=isVen?dlvPdv+2:dlvPdv;
             const nbCasiers=(p.casiers&&p.casiers[sid])||0;
@@ -1094,8 +1107,22 @@ async function genererEtCreerBons(){
 
   // Tickets conditionnement — TOUS les produits (pas de distinction fini/vrac)
   // Besoin total tous PDVs sur DLV PDV jours à partir d'aujourd'hui
+  // Collecter les produits déjà conditionnés (done) aujourd'hui pour ne pas les recréer
+  const condSnap=await new Promise(function(res){window.onValue(window.ref(window.db,'conditionnement'),function(s){res(s);},{onlyOnce:true});});
+  const condFresh=condSnap.val()||{};
+  const todayStart=new Date();todayStart.setHours(0,0,0,0);
+  const todayTs=todayStart.getTime();
+  const produitsDoneToday=new Set();
+  for(const [cid,ct] of Object.entries(condFresh)){
+    if(ct.done&&ct.note&&ct.note.startsWith('Auto')&&ct.doneAt&&ct.doneAt>=todayTs){
+      produitsDoneToday.add(ct.produitId);
+    }
+  }
+
   for(const [pid,p] of Object.entries(produits)){
     if(p.statut==='archive')continue;
+    // Si ce produit a déjà été conditionné (validé) aujourd'hui, ne pas recréer
+    if(produitsDoneToday.has(pid))continue;
     const dlvPdv=p.dlcPdv||7;
     let besoinTotal=0;let stockPdvsTotal=0;
     for(const [sid,sv] of pdvEntries){
@@ -1118,7 +1145,7 @@ async function genererEtCreerBons(){
   }
 
   const msg=`✓ ${nbBons} livraison(s) · ${nbTickets} ticket(s) conditionnement`;
-  showToast(msg);if(statusEl)statusEl.textContent=msg;
+  showToast(msg);setStatus(msg);
   genererApercu();
 }
 
